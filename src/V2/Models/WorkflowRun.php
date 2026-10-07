@@ -16,6 +16,7 @@ use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Exceptions\WorkflowOutputCodecUnavailableException;
 use Workflow\V2\Support\ConfiguredV2Models;
 use Workflow\V2\Support\ExternalPayloads;
+use Workflow\V2\Support\RunWaitOrder;
 
 class WorkflowRun extends Model
 {
@@ -196,12 +197,13 @@ class WorkflowRun extends Model
 
     public function waits(): HasMany
     {
-        return $this->hasMany(
+        $relation = $this->hasMany(
             ConfiguredV2Models::resolve('run_wait_model', WorkflowRunWait::class),
             'workflow_run_id',
-        )
-            ->orderBy('position')
-            ->orderBy('wait_id');
+        );
+        RunWaitOrder::applyToQuery($relation->getQuery());
+
+        return $relation;
     }
 
     public function timelineEntries(): HasMany

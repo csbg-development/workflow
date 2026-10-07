@@ -144,12 +144,17 @@ final class RunWaitProjector
         $seen = [];
         $projected = [];
         $existing = $waitModel::query()->where('workflow_run_id', $run->id)->get()->keyBy('id');
+        $nextPosition = $existing->isEmpty()
+            ? 0
+            : ((int) $existing->max('position')) + 1;
 
-        foreach (array_values($waits) as $position => $wait) {
-            $waitId = self::waitId($wait, $position);
+        foreach (array_values($waits) as $displayPosition => $wait) {
+            $waitId = self::waitId($wait, $displayPosition);
             $projectionId = self::projectionId($run->id, $waitId);
             $payload = self::normalizedPayload($wait);
             $seen[] = $projectionId;
+            $existingRow = $existing->get($projectionId);
+            $position = $existingRow?->position ?? $nextPosition++;
 
             /** @var WorkflowRunWait $row */
             $row = IdempotentProjectionUpsert::upsert(
@@ -187,7 +192,7 @@ final class RunWaitProjector
                     'history_unsupported_reason' => self::stringValue($wait['history_unsupported_reason'] ?? null),
                     'payload' => $payload,
                 ],
-                $existing->get($projectionId),
+                $existingRow,
             );
 
             $projected[] = $row;
@@ -293,12 +298,11 @@ final class RunWaitProjector
 
         $waitModel = self::waitModel();
 
+        $query = $waitModel::query()
+            ->where('workflow_run_id', $run->id);
+
         /** @var EloquentCollection<int, WorkflowRunWait> $waits */
-        $waits = $waitModel::query()
-            ->where('workflow_run_id', $run->id)
-            ->orderBy('position')
-            ->orderBy('wait_id')
-            ->get();
+        $waits = RunWaitOrder::applyToQuery($query)->get();
 
         return $waits;
     }

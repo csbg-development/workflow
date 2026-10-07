@@ -65,7 +65,7 @@ final class V2WorkflowRunRetentionCleanupTest extends TestCase
         $this->assertSame(1, $report['commands_deleted']);
         $this->assertSame(1, $report['failures_deleted']);
         $this->assertSame(1, $report['history_events_deleted']);
-        $this->assertSame(2, $report['links_deleted']);
+        $this->assertSame(3, $report['links_deleted']);
         $this->assertSame(1, $report['memos_deleted']);
         $this->assertSame(1, $report['messages_deleted']);
         $this->assertSame(1, $report['run_lineage_entries_deleted']);
@@ -96,6 +96,40 @@ final class V2WorkflowRunRetentionCleanupTest extends TestCase
         ]);
         $this->assertDatabaseHas('workflow_run_summaries', [
             'id' => $otherRun->id,
+        ]);
+        $this->assertDatabaseMissing('workflow_links', [
+            'parent_workflow_run_id' => $run->id,
+            'link_type' => 'continue_as_new',
+        ]);
+    }
+
+    public function testPrunesRunDetailWhilePreservingContinueAsNewLinksWhenRequested(): void
+    {
+        $run = $this->seedRun(status: RunStatus::Completed, closed: true);
+        $otherRun = $this->seedRun(status: RunStatus::Completed, closed: true);
+
+        $this->seedRetainedRows($run, $otherRun);
+
+        $report = WorkflowRunRetentionCleanup::pruneRun($run, preserveContinueAsNewLinks: true);
+
+        $this->assertSame(2, $report['links_deleted']);
+        $this->assertSame(1, $report['tasks_deleted']);
+        $this->assertSame(1, $report['history_events_deleted']);
+        $this->assertSame(1, $report['run_summary_deleted']);
+        $this->assertDatabaseHas('workflow_links', [
+            'parent_workflow_run_id' => $run->id,
+            'child_workflow_run_id' => $otherRun->id,
+            'link_type' => 'continue_as_new',
+        ]);
+        $this->assertDatabaseMissing('workflow_links', [
+            'parent_workflow_run_id' => $run->id,
+            'link_type' => 'child',
+        ]);
+        $this->assertDatabaseMissing('workflow_tasks', [
+            'workflow_run_id' => $run->id,
+        ]);
+        $this->assertDatabaseMissing('workflow_run_summaries', [
+            'id' => $run->id,
         ]);
     }
 
@@ -454,6 +488,16 @@ final class V2WorkflowRunRetentionCleanupTest extends TestCase
             'child_workflow_run_id' => $run->id,
             'is_primary_parent' => false,
             'parent_close_policy' => ParentClosePolicy::Abandon->value,
+        ]);
+        WorkflowLink::query()->create([
+            'id' => (string) Str::ulid(),
+            'link_type' => 'continue_as_new',
+            'sequence' => 5,
+            'parent_workflow_instance_id' => $run->workflow_instance_id,
+            'parent_workflow_run_id' => $run->id,
+            'child_workflow_instance_id' => $otherRun->workflow_instance_id,
+            'child_workflow_run_id' => $otherRun->id,
+            'is_primary_parent' => true,
         ]);
     }
 

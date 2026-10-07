@@ -42,6 +42,7 @@ use Workflow\V2\Models\WorkflowUpdate;
 final class WorkflowRunRetentionCleanup
 {
     /**
+     * @param bool $preserveContinueAsNewLinks Keep continuation lineage while pruning the run detail.
      * @return array{
      *     activity_attempts_deleted: int,
      *     activity_executions_deleted: int,
@@ -66,11 +67,11 @@ final class WorkflowRunRetentionCleanup
      *     updates_deleted: int
      * }
      */
-    public static function pruneRun(WorkflowRun|string $run): array
+    public static function pruneRun(WorkflowRun|string $run, bool $preserveContinueAsNewLinks = false): array
     {
         $runId = $run instanceof WorkflowRun ? (string) $run->getKey() : $run;
 
-        return DB::transaction(static function () use ($runId): array {
+        return DB::transaction(static function () use ($runId, $preserveContinueAsNewLinks): array {
             /** @var WorkflowRun $lockedRun */
             $lockedRun = ConfiguredV2Models::query('run_model', WorkflowRun::class)
                 ->whereKey($runId)
@@ -102,7 +103,7 @@ final class WorkflowRunRetentionCleanup
                 'parent_workflow_run_id',
                 $runId,
             );
-            $report['links_deleted'] = self::deleteLinks($runId);
+            $report['links_deleted'] = self::deleteLinks($runId, $preserveContinueAsNewLinks);
             $report['activity_executions_deleted'] = self::deleteByRun(
                 ConfiguredV2Models::query('activity_execution_model', ActivityExecution::class),
                 $runId,
@@ -263,14 +264,19 @@ final class WorkflowRunRetentionCleanup
             ->delete();
     }
 
-    private static function deleteLinks(string $runId): int
+    private static function deleteLinks(string $runId, bool $preserveContinueAsNewLinks): int
     {
-        return ConfiguredV2Models::query('link_model', WorkflowLink::class)
+        $query = ConfiguredV2Models::query('link_model', WorkflowLink::class)
             ->where(static function (Builder $query) use ($runId): void {
                 $query
                     ->where('parent_workflow_run_id', $runId)
                     ->orWhere('child_workflow_run_id', $runId);
-            })
-            ->delete();
+            });
+
+        if ($preserveContinueAsNewLinks) {
+            $query->where('link_type', '!=', 'continue_as_new');
+        }
+
+        return $query->delete();
     }
 }

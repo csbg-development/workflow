@@ -197,6 +197,74 @@ final class ProjectionPrefetchTest extends TestCase
         );
     }
 
+    public function testWaitProjectionDoesNotRewriteExistingRowsWhenDisplayOrderChanges(): void
+    {
+        $run = $this->seedRun('stable-wait-position');
+        $resolvedWaits = [
+            [
+                'id' => 'B-resolved',
+                'kind' => 'signal',
+                'status' => 'resolved',
+                'opened_at' => '2026-09-01T12:00:00.000900Z',
+            ],
+            [
+                'id' => 'a-resolved',
+                'kind' => 'signal',
+                'status' => 'resolved',
+                'opened_at' => '2026-09-01T12:00:00.000100Z',
+            ],
+        ];
+        $existingRows = RunWaitProjector::project($run, $resolvedWaits);
+        $existingPositions = array_column(array_map(
+            static fn (Model $row): array => $row->getAttributes(),
+            $existingRows,
+        ), 'position', 'wait_id');
+        $connection = $existingRows[0]->getConnection();
+        $table = $existingRows[0]->getTable();
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+
+        try {
+            $projected = RunWaitProjector::project($run->fresh(), [
+                [
+                    'id' => 'new-open',
+                    'kind' => 'signal',
+                    'status' => 'open',
+                    'opened_at' => '2026-09-01T12:00:02.000000Z',
+                ],
+                ...$resolvedWaits,
+            ]);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+
+        $writes = array_filter($queries, static fn (array $query): bool => preg_match(
+            '/^(insert|update|delete)\b/i',
+            ltrim($query['query']),
+        ) === 1 && str_contains($query['query'], $table));
+
+        $this->assertCount(1, $writes, sprintf(
+            'Changing wait display order emitted projection writes: %s',
+            json_encode(array_column($writes, 'query'), JSON_THROW_ON_ERROR),
+        ));
+        $this->assertSame(
+            $existingPositions,
+            array_column(array_map(
+                static fn (Model $row): array => $row->fresh()
+                    ->getAttributes(),
+                array_slice($projected, 1),
+            ), 'position', 'wait_id'),
+        );
+        $this->assertSame(
+            ['new-open', 'B-resolved', 'a-resolved'],
+            $run->fresh()
+                ->waits()
+                ->pluck('wait_id')
+                ->all(),
+        );
+    }
+
     /**
      * @return list<array<string, mixed>>
      */
