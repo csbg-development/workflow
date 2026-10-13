@@ -16,9 +16,10 @@ use Throwable;
  * drives the scan through the `workflow_run_id` secondary index. Under InnoDB
  * REPEATABLE-READ that takes next-key (record + gap) locks over the scanned
  * range, so two concurrent projector runs for the same run form a lock cycle
- * (#399 / #425). This helper resolves the reconcile step via a snapshot read of
- * primary keys followed by a point-lock DELETE against the clustered index,
- * which takes record locks only and cannot gap-deadlock with a sibling projector.
+ * (#399 / #425). This helper resolves the reconcile step via a prefetched or
+ * scoped snapshot of primary keys followed by point-lock DELETEs against the
+ * clustered index, which take record locks only and cannot gap-deadlock with a
+ * sibling projector.
  *
  * Stale ids are sorted before the DELETE so two concurrent projectors that
  * compute overlapping (but non-identical) stale sets acquire row locks in the
@@ -33,12 +34,13 @@ final class StaleProjectionCleanup
     /**
      * @param class-string<Model> $model
      * @param list<string> $seen
+     * @param list<string>|null $existingIds
      */
-    public static function forRun(string $model, string $runId, array $seen): void
+    public static function forRun(string $model, string $runId, array $seen, ?array $existingIds = null): void
     {
         for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
             try {
-                self::pruneOnce($model, $runId, $seen);
+                self::pruneOnce($model, $runId, $seen, $existingIds);
 
                 return;
             } catch (QueryException $e) {
@@ -54,14 +56,17 @@ final class StaleProjectionCleanup
     /**
      * @param class-string<Model> $model
      * @param list<string> $seen
+     * @param list<string>|null $existingIds
      */
-    private static function pruneOnce(string $model, string $runId, array $seen): void
+    private static function pruneOnce(string $model, string $runId, array $seen, ?array $existingIds): void
     {
-        /** @var list<string> $existingIds */
-        $existingIds = $model::query()
-            ->where('workflow_run_id', $runId)
-            ->pluck('id')
-            ->all();
+        if ($existingIds === null) {
+            /** @var list<string> $existingIds */
+            $existingIds = $model::query()
+                ->where('workflow_run_id', $runId)
+                ->pluck('id')
+                ->all();
+        }
 
         if ($existingIds === []) {
             return;
@@ -77,9 +82,21 @@ final class StaleProjectionCleanup
 
         sort($staleIds);
 
-        $model::query()
-            ->whereIn('id', $staleIds)
-            ->delete();
+        self::deleteRows($model, $runId, $staleIds);
+    }
+
+    /**
+     * @param class-string<Model> $model
+     * @param list<string> $staleIds
+     */
+    private static function deleteRows(string $model, string $runId, array $staleIds): void
+    {
+        foreach ($staleIds as $staleId) {
+            $model::query()
+                ->where('workflow_run_id', $runId)
+                ->whereKey($staleId)
+                ->delete();
+        }
     }
 
     private static function isConcurrencyError(Throwable $e): bool

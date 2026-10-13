@@ -219,14 +219,29 @@ final class CurrentRunResolver
         $runIdLookup = array_fill_keys($runIds, true);
         $successors = [];
 
-        ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class)
-            ->whereIn('workflow_run_id', $runIds)
+        $historyQuery = ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class);
+        $instanceRunQuery = ConfiguredV2Models::query('run_model', WorkflowRun::class);
+
+        if ($historyQuery->getModel()->getConnection() === $instanceRunQuery->getModel()->getConnection()) {
+            $instanceRunQuery
+                ->select($instanceRunQuery->getModel()->getQualifiedKeyName())
+                ->where($instanceRunQuery->getModel()->qualifyColumn('workflow_instance_id'), $instance->id);
+
+            $historyQuery->whereIn('workflow_run_id', $instanceRunQuery->toBase());
+        } else {
+            // Independently configured connections cannot share a SQL subquery.
+            $historyQuery->whereIn('workflow_run_id', $runIds);
+        }
+
+        $historyQuery
             ->where('event_type', HistoryEventType::WorkflowStarted->value)
             ->get(['workflow_run_id', 'payload'])
             ->each(static function (WorkflowHistoryEvent $event) use (&$successors, $runIdLookup): void {
                 $continuedFromRunId = self::continuedFromRunId($event);
 
-                if ($continuedFromRunId === null || ! isset($runIdLookup[$continuedFromRunId])) {
+                if (! isset($runIdLookup[$event->workflow_run_id])
+                    || $continuedFromRunId === null
+                    || ! isset($runIdLookup[$continuedFromRunId])) {
                     return;
                 }
 

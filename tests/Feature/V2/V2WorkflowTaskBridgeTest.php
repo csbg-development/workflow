@@ -94,6 +94,7 @@ use Workflow\V2\Support\WorkflowCommandNormalizer;
 use Workflow\V2\Support\WorkflowExecutionGate;
 use Workflow\V2\Support\WorkflowFiberRunner;
 use Workflow\V2\Support\WorkflowReplayer;
+use Workflow\V2\Support\WorkflowTaskClaimProjectionContext;
 use Workflow\V2\Support\WorkflowTaskOwnership;
 use Workflow\V2\Support\WorkflowTaskPayload;
 use Workflow\V2\Workflow as V2Workflow;
@@ -11267,6 +11268,103 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertTrue($result['executed']);
         $this->assertSame('completed', $result['run_status']);
         $this->assertSame([['projectRun', $run->id], ['projectRun', $run->id]], $customRole->calls);
+    }
+
+    public function testExecuteUsesBoundedClaimProjectionBeforeFullStateTransitionProjection(): void
+    {
+        $run = $this->createWaitingRun();
+
+        /** @var WorkflowTask $task */
+        $task = WorkflowTask::query()->create([
+            'workflow_run_id' => $run->id,
+            'task_type' => TaskType::Workflow->value,
+            'status' => TaskStatus::Ready->value,
+            'available_at' => now()
+                ->subSecond(),
+            'payload' => [],
+            'connection' => 'redis',
+            'queue' => 'default',
+            'compatibility' => 'build-a',
+        ]);
+
+        $this->createHistoryBudgetSummary($run, 0, 0, 0);
+
+        $customRole = new class(new DefaultHistoryProjectionRole()) implements HistoryProjectionRole {
+            /**
+             * @var list<array{
+             *     claim_task_id: string|null,
+             *     history_loaded: bool,
+             *     tasks_loaded: bool,
+             *     history_reads: int,
+             *     timeline_reads: int
+             * }>
+             */
+            public array $calls = [];
+
+            public function __construct(
+                private readonly DefaultHistoryProjectionRole $delegate,
+            ) {
+            }
+
+            public function projectRun(WorkflowRun $run): WorkflowRunSummary
+            {
+                $queryOffset = count(DB::getQueryLog());
+                $claimTask = WorkflowTaskClaimProjectionContext::taskFor($run);
+                $summary = $this->delegate->projectRun($run);
+                $queries = array_slice(DB::getQueryLog(), $queryOffset);
+
+                $this->calls[] = [
+                    'claim_task_id' => $claimTask?->id,
+                    'history_loaded' => $run->relationLoaded('historyEvents'),
+                    'tasks_loaded' => $run->relationLoaded('tasks'),
+                    'history_reads' => $this->selectCount($queries, 'workflow_history_events'),
+                    'timeline_reads' => $this->selectCount($queries, 'workflow_run_timeline_entries'),
+                ];
+
+                return $summary;
+            }
+
+            public function recordActivityStarted(
+                WorkflowRun $run,
+                ActivityExecution $execution,
+                \Workflow\V2\Models\ActivityAttempt $attempt,
+                WorkflowTask $task,
+            ): WorkflowRunSummary {
+                return $this->delegate->recordActivityStarted($run, $execution, $attempt, $task);
+            }
+
+            /**
+             * @param list<array{query: string}> $queries
+             */
+            private function selectCount(array $queries, string $table): int
+            {
+                return collect($queries)
+                    ->filter(static fn (array $query): bool =>
+                        str_starts_with(strtolower(ltrim($query['query'])), 'select')
+                        && str_contains($query['query'], $table))
+                    ->count();
+            }
+        };
+
+        $this->app->instance(HistoryProjectionRole::class, $customRole);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $result = $this->bridge->execute($task->id);
+        DB::disableQueryLog();
+
+        $this->assertTrue($result['executed']);
+        $this->assertSame(TaskStatus::Completed, $task->fresh()->status);
+        $this->assertCount(2, $customRole->calls);
+        $this->assertSame($task->id, $customRole->calls[0]['claim_task_id']);
+        $this->assertFalse($customRole->calls[0]['history_loaded']);
+        $this->assertFalse($customRole->calls[0]['tasks_loaded']);
+        $this->assertSame(0, $customRole->calls[0]['history_reads']);
+        $this->assertSame(0, $customRole->calls[0]['timeline_reads']);
+        $this->assertNull($customRole->calls[1]['claim_task_id']);
+        $this->assertTrue($customRole->calls[1]['history_loaded']);
+        $this->assertTrue($customRole->calls[1]['tasks_loaded']);
+        $this->assertGreaterThan(0, $customRole->calls[1]['timeline_reads']);
     }
 
     public function testFailUsesHistoryProjectionRoleBinding(): void

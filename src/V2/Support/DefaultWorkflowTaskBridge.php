@@ -6088,7 +6088,11 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
                 'last_claim_error' => null,
             ])->save();
 
-            self::projectRun($run, self::PROJECTION_RUN_RELATIONS);
+            if ($run->status->isTerminal()) {
+                self::projectRun($run, self::PROJECTION_RUN_RELATIONS);
+            } else {
+                self::projectWorkflowTaskClaim($run, $task);
+            }
 
             return true;
         });

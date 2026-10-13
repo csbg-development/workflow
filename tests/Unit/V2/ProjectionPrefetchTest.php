@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
+use Workflow\V2\Contracts\HistoryProjectionMaintenanceRole;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunTimerEntry;
@@ -114,8 +115,7 @@ final class ProjectionPrefetchTest extends TestCase
 
         $reads = array_filter($queries, static fn (array $query): bool =>
             str_starts_with(strtolower($query['query']), 'select') && str_contains($query['query'], $table));
-        // One prefetched row set plus the existing stale-cleanup primary-key snapshot.
-        $this->assertCount(2, $reads);
+        $this->assertCount($projector === RunTimelineProjector::class ? 1 : 2, $reads);
         $this->assertSame($expected, array_map(self::attributes(...), $reprojected));
 
         $rows[0]->forceFill([
@@ -134,7 +134,7 @@ final class ProjectionPrefetchTest extends TestCase
 
         $repaired = $projector::project($run->fresh(), $entries);
         $this->assertCount(count($entries), $repaired);
-        $this->assertSame($expected[0]['payload'], $repaired[0]->getRawOriginal('payload'));
+        $this->assertSame($expected[0]['payload'], self::normalizeAssociativeKeys($repaired[0]->payload));
         $this->assertSame($expected[1]['id'], $repaired[1]->getKey());
         $this->assertNull($orphan->fresh());
         $this->assertNotNull($otherRows[0]->fresh());
@@ -195,6 +195,23 @@ final class ProjectionPrefetchTest extends TestCase
             array_column($entries, 'status', 'id'),
             array_column(array_map(static fn (Model $row): array => $row->payload, $reprojected), 'status', 'id'),
         );
+    }
+
+    public function testTimelineProjectorPreservesTheCustomMaintenanceRoleContract(): void
+    {
+        $run = $this->seedRun('custom-maintenance-role');
+        $entries = $this->entries();
+        $role = $this->createMock(HistoryProjectionMaintenanceRole::class);
+        $role->expects($this->once())
+            ->method('pruneStaleProjectionRowsForRun')
+            ->with(
+                WorkflowTimelineEntry::class,
+                $run->id,
+                $this->callback(static fn (array $seen): bool => count($seen) === count($entries)),
+            );
+        $this->app->instance(HistoryProjectionMaintenanceRole::class, $role);
+
+        RunTimelineProjector::project($run, $entries);
     }
 
     public function testWaitProjectionDoesNotRewriteExistingRowsWhenDisplayOrderChanges(): void
@@ -289,9 +306,31 @@ final class ProjectionPrefetchTest extends TestCase
     private static function attributes(Model $row): array
     {
         $attributes = $row->getAttributes();
+
+        if (isset($attributes['payload']) && is_string($attributes['payload'])) {
+            $attributes['payload'] = self::normalizeAssociativeKeys(
+                json_decode($attributes['payload'], true, flags: JSON_THROW_ON_ERROR),
+            );
+        }
+
         ksort($attributes);
 
         return $attributes;
+    }
+
+    private static function normalizeAssociativeKeys(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (array_is_list($value)) {
+            return array_map(self::normalizeAssociativeKeys(...), $value);
+        }
+
+        ksort($value);
+
+        return array_map(self::normalizeAssociativeKeys(...), $value);
     }
 
     private static function reverseAssociativeKeys(mixed $value): mixed

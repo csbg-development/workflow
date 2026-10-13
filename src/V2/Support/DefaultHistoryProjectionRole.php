@@ -65,6 +65,20 @@ final class DefaultHistoryProjectionRole implements HistoryProjectionRole, Histo
         StaleProjectionCleanup::forRun($projectionModel, $runId, $seenProjectionIds);
     }
 
+    /**
+     * @param class-string<Model> $projectionModel
+     * @param list<string> $seenProjectionIds
+     * @param list<string> $existingProjectionIds
+     */
+    public function pruneStaleProjectionRowsForRunFromSnapshot(
+        string $projectionModel,
+        string $runId,
+        array $seenProjectionIds,
+        array $existingProjectionIds,
+    ): void {
+        StaleProjectionCleanup::forRun($projectionModel, $runId, $seenProjectionIds, $existingProjectionIds);
+    }
+
     public function pruneStaleProjections(array $runIds = [], ?string $instanceId = null, bool $dryRun = false): array
     {
         $staleSummaryQuery = $this->staleSummaryQuery($runIds, $instanceId);

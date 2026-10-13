@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Unit\V2;
 
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 use Workflow\V2\Models\WorkflowInstance;
@@ -73,6 +74,92 @@ final class StaleProjectionCleanupTest extends TestCase
         ]);
     }
 
+    public function testProvidedSnapshotAvoidsASecondRunScopedReadAndDeletesSortedStaleIds(): void
+    {
+        $run = $this->seedRun();
+        $keep = $this->seedTimelineEntry($run, 'keep');
+        $staleA = $this->seedTimelineEntry($run, 'stale-a');
+        $staleB = $this->seedTimelineEntry($run, 'stale-b');
+        $snapshot = [$staleB->id, $keep->id, $staleA->id];
+        $expectedDeleteIds = [$staleA->id, $staleB->id];
+        sort($expectedDeleteIds);
+        $connection = DB::connection($keep->getConnectionName());
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+
+        try {
+            StaleProjectionCleanup::forRun(WorkflowTimelineEntry::class, $run->id, [$keep->id], $snapshot);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+
+        $reads = array_values(array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'select')
+            && str_contains($query['query'], 'workflow_run_timeline_entries')));
+        $deletes = array_values(array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'delete')
+            && str_contains($query['query'], 'workflow_run_timeline_entries')));
+
+        $this->assertSame([], $reads);
+        $this->assertCount(2, $deletes);
+        $this->assertSame(
+            array_map(static fn (string $id): array => [$run->id, $id], $expectedDeleteIds),
+            array_map(static fn (array $query): array => $query['bindings'], $deletes),
+        );
+        foreach ($deletes as $delete) {
+            $this->assertStringContainsString('workflow_run_id', $delete['query']);
+        }
+        $this->assertNotNull($keep->fresh());
+        $this->assertNull($staleA->fresh());
+        $this->assertNull($staleB->fresh());
+    }
+
+    public function testProvidedSnapshotToleratesAConcurrentStaleRowDeletion(): void
+    {
+        $run = $this->seedRun();
+        $keep = $this->seedTimelineEntry($run, 'keep-after-race');
+        $stale = $this->seedTimelineEntry($run, 'stale-deleted-by-peer');
+        $snapshot = [$keep->id, $stale->id];
+
+        $stale->delete();
+
+        StaleProjectionCleanup::forRun(WorkflowTimelineEntry::class, $run->id, [$keep->id], $snapshot);
+
+        $this->assertNotNull($keep->fresh());
+        $this->assertNull($stale->fresh());
+    }
+
+    public function testProvidedSnapshotCannotDeleteAProjectionOwnedByAnotherRun(): void
+    {
+        $run = $this->seedRun();
+        $otherRun = $this->seedRun();
+        $stale = $this->seedTimelineEntry($run, 'stale-for-run');
+        $foreign = $this->seedTimelineEntry($otherRun, 'foreign-snapshot-row');
+
+        StaleProjectionCleanup::forRun(WorkflowTimelineEntry::class, $run->id, [], [$stale->id, $foreign->id]);
+
+        $this->assertNull($stale->fresh());
+        $this->assertNotNull($foreign->fresh());
+    }
+
+    public function testProvidedSnapshotPreservesConfiguredModelGlobalScopes(): void
+    {
+        $run = $this->seedRun();
+        $stale = $this->seedTimelineEntry($run, 'visible-stale');
+        $scopeProtected = $this->seedTimelineEntry($run, 'scope-protected');
+
+        StaleProjectionCleanup::forRun(
+            ScopeProtectedTimelineEntry::class,
+            $run->id,
+            [],
+            [$stale->id, $scopeProtected->id],
+        );
+
+        $this->assertNull($stale->fresh());
+        $this->assertNotNull($scopeProtected->fresh());
+    }
+
     private function seedRun(): WorkflowRun
     {
         $instance = WorkflowInstance::query()->create([
@@ -112,5 +199,17 @@ final class StaleProjectionCleanupTest extends TestCase
             'recorded_at' => now(),
             'payload' => [],
         ]);
+    }
+}
+
+final class ScopeProtectedTimelineEntry extends WorkflowTimelineEntry
+{
+    protected static function booted(): void
+    {
+        static::addGlobalScope('protect-history-event', static function (
+            \Illuminate\Database\Eloquent\Builder $query,
+        ): void {
+            $query->where('history_event_id', '!=', 'scope-protected');
+        });
     }
 }

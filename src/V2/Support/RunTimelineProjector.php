@@ -23,7 +23,9 @@ final class RunTimelineProjector
     {
         $entries ??= HistoryTimeline::fromHistory($run);
         $entryModel = self::entryModel();
-        $existing = $entryModel::query()->where('workflow_run_id', $run->id)->get()->keyBy('id');
+        $existingRows = $entryModel::query()->where('workflow_run_id', $run->id)->get();
+        $existingIds = array_map(static fn (mixed $id): string => (string) $id, $existingRows->modelKeys());
+        $existing = $existingRows->keyBy('id');
         $seen = [];
         $projected = [];
 
@@ -46,8 +48,7 @@ final class RunTimelineProjector
             );
         }
 
-        self::historyProjectionMaintenanceRole()
-            ->pruneStaleProjectionRowsForRun($entryModel, $run->id, $seen);
+        self::pruneStaleProjectionRowsForRun($entryModel, $run->id, $seen, $existingIds);
 
         $run->unsetRelation('timelineEntries');
 
@@ -201,6 +202,28 @@ final class RunTimelineProjector
         $role = App::make(HistoryProjectionMaintenanceRole::class);
 
         return $role;
+    }
+
+    /**
+     * @param class-string<WorkflowTimelineEntry> $entryModel
+     * @param list<string> $seen
+     * @param list<string> $existingIds
+     */
+    private static function pruneStaleProjectionRowsForRun(
+        string $entryModel,
+        string $runId,
+        array $seen,
+        array $existingIds,
+    ): void {
+        $role = self::historyProjectionMaintenanceRole();
+
+        if ($role instanceof DefaultHistoryProjectionRole) {
+            $role->pruneStaleProjectionRowsForRunFromSnapshot($entryModel, $runId, $seen, $existingIds);
+
+            return;
+        }
+
+        $role->pruneStaleProjectionRowsForRun($entryModel, $runId, $seen);
     }
 
     /**
