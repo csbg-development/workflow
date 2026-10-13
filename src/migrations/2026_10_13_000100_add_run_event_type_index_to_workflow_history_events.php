@@ -17,7 +17,7 @@ return new class() extends WorkflowMigration {
         $connection = DB::connection($this->getConnection());
         $schema = $connection->getSchemaBuilder();
 
-        if (! $schema->hasTable(self::TABLE) || $this->indexExists($connection)) {
+        if (! $this->tableExists($connection) || $this->indexExists($connection)) {
             return;
         }
 
@@ -37,7 +37,7 @@ return new class() extends WorkflowMigration {
         $connection = DB::connection($this->getConnection());
         $schema = $connection->getSchemaBuilder();
 
-        if (! $schema->hasTable(self::TABLE) || ! $this->indexExists($connection)) {
+        if (! $this->tableExists($connection) || ! $this->indexExists($connection)) {
             return;
         }
 
@@ -50,6 +50,25 @@ return new class() extends WorkflowMigration {
         $schema->table(self::TABLE, static function (Blueprint $table): void {
             $table->dropIndex(self::INDEX);
         });
+    }
+
+    private function tableExists(Connection $connection): bool
+    {
+        $table = $connection->getTablePrefix() . self::TABLE;
+        $sql = match ($connection->getDriverName()) {
+            'mysql', 'mariadb' => 'SELECT 1 FROM information_schema.tables '
+                . "WHERE table_schema = database() AND table_name = ? AND table_type IN ('BASE TABLE', 'SYSTEM VERSIONED') LIMIT 1",
+            'pgsql' => 'SELECT 1 FROM information_schema.tables '
+                . "WHERE table_schema = ANY (current_schemas(false)) AND table_name = ? AND table_type = 'BASE TABLE' LIMIT 1",
+            'sqlite' => "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+            'sqlsrv' => "SELECT TOP 1 1 FROM sys.tables WHERE object_id = OBJECT_ID(?, 'U')",
+            default => throw new \RuntimeException(sprintf(
+                'Cannot inspect workflow history tables for database driver [%s].',
+                $connection->getDriverName(),
+            )),
+        };
+
+        return $connection->selectOne($sql, [$table], false) !== null;
     }
 
     private function indexExists(Connection $connection): bool

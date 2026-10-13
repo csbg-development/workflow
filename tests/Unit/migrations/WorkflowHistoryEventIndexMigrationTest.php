@@ -137,6 +137,28 @@ final class WorkflowHistoryEventIndexMigrationTest extends SchemaTestCase
         (new \ReflectionMethod($migration, 'alterOnlineIndex'))->invoke($migration, $connection);
     }
 
+    public function testMySqlMigrationUsesWriterWhenAReaderIsConfigured(): void
+    {
+        $connection = DB::connection();
+
+        if ($connection->getDriverName() !== 'mysql') {
+            $this->markTestSkipped('This split-connection regression requires MySQL.');
+        }
+
+        $migration = require self::MIGRATION;
+        $reader = $connection->getReadPdo();
+        $connection->setReadPdo(new \PDO('sqlite::memory:'));
+
+        try {
+            $migration->down();
+            $migration->up();
+        } finally {
+            $connection->setReadPdo($reader);
+        }
+
+        $this->assertSame(['workflow_run_id', 'event_type'], $this->historyIndexes()[self::INDEX] ?? null);
+    }
+
     /**
      * @return array<string, list<string>>
      */
