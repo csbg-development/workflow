@@ -119,7 +119,10 @@ final class WorkflowHistoryEventIndexMigrationTest extends SchemaTestCase
     {
         $migration = require self::MIGRATION;
         $connection = $this->createMock(Connection::class);
-        $connection->method('select')
+        $connection->expects($this->never())
+            ->method('select');
+        $connection->expects($this->once())
+            ->method('selectFromWriteConnection')
             ->willReturn([
                 (object) [
                     'Variable_name' => 'lock_wait_timeout',

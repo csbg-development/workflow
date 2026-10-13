@@ -57,7 +57,7 @@ return new class() extends WorkflowMigration {
         $table = $connection->getTablePrefix() . self::TABLE;
 
         if (in_array($connection->getDriverName(), ['mysql', 'mariadb'], true)) {
-            $columns = $connection->select(
+            $columns = $connection->selectFromWriteConnection(
                 'SELECT column_name FROM information_schema.statistics '
                 . 'WHERE table_schema = database() AND table_name = ? AND index_name = ? ORDER BY seq_in_index',
                 [$table, self::INDEX],
@@ -80,14 +80,17 @@ return new class() extends WorkflowMigration {
                 'SELECT 1 FROM pg_indexes '
                 . 'WHERE schemaname = ANY (current_schemas(false)) AND tablename = ? AND indexname = ? LIMIT 1',
                 [$table, self::INDEX],
+                false,
             ) !== null,
             'sqlite' => $connection->selectOne(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ? LIMIT 1",
                 [$table, self::INDEX],
+                false,
             ) !== null,
             'sqlsrv' => $connection->selectOne(
                 "SELECT TOP 1 1 FROM sys.indexes WHERE object_id = OBJECT_ID(?, 'U') AND name = ?",
                 [$table, self::INDEX],
+                false,
             ) !== null,
             default => throw new \RuntimeException(sprintf(
                 'Cannot inspect workflow history indexes for database driver [%s].',
@@ -104,7 +107,7 @@ return new class() extends WorkflowMigration {
             'innodb_ddl_buffer_size' => 1048576,
             'innodb_parallel_read_threads' => 1,
         ];
-        $settings = $connection->select(
+        $settings = $connection->selectFromWriteConnection(
             "SHOW SESSION VARIABLES WHERE Variable_name IN ('lock_wait_timeout', 'innodb_ddl_threads', "
             . "'innodb_ddl_buffer_size', 'innodb_parallel_read_threads')",
         );
