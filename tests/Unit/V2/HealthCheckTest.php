@@ -28,6 +28,39 @@ use Workflow\V2\Support\WorkerCompatibilityFleet;
 
 final class HealthCheckTest extends TestCase
 {
+    public function testDisabledSelectedRunProjectionAuditsRemainUnknown(): void
+    {
+        config()
+            ->set('queue.default', 'redis');
+        config()
+            ->set('queue.connections.redis.driver', 'redis');
+        config()
+            ->set('cache.default', 'array');
+        config()
+            ->set('cache.stores.array.driver', 'array');
+        config()
+            ->set('workflows.v2.observability.selected_run_projection_drift_enabled', false);
+
+        $snapshot = HealthCheck::snapshot();
+        $projection = collect($snapshot['checks'])->firstWhere('name', 'selected_run_projections');
+
+        $this->assertSame('warning', $projection['status']);
+        $this->assertFalse($projection['data']['evaluated']);
+        $this->assertSame('selected_run_projection_drift_disabled', $projection['data']['reason']);
+        $this->assertSame(0, $projection['data']['run_waits_missing_current_open_waits']);
+
+        foreach ([
+            'run_waits_orphaned',
+            'timeline_missing_history_events',
+            'timeline_orphaned',
+            'timer_schema_version_mismatch_rows',
+            'timer_orphaned',
+            'lineage_orphaned',
+        ] as $field) {
+            $this->assertNull($projection['data'][$field]);
+        }
+    }
+
     public function testSnapshotFailsReadinessWhenBackendCapabilitiesAreUnsupported(): void
     {
         Carbon::setTestNow('2026-04-09 12:00:00');

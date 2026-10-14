@@ -200,16 +200,22 @@ final class HealthCheck
                 'run_waits_stale_projected_runs' => ($waits['evaluated'] ?? true) === true
                     ? self::integer($waits['stale_projected_runs'] ?? 0)
                     : null,
-                'run_waits_orphaned' => self::integer($waits['orphaned'] ?? 0),
+                'run_waits_orphaned' => ($waits['evaluated'] ?? true) === true
+                    ? self::integer($waits['orphaned'] ?? 0)
+                    : null,
                 'timeline_needs_rebuild' => $timelineNeedsRebuild,
                 'timeline_missing_runs_with_history' => ($timeline['evaluated'] ?? true) === true
                     ? self::integer($timeline['missing_runs_with_history'] ?? 0)
                     : null,
-                'timeline_missing_history_events' => self::integer($timeline['missing_history_events'] ?? 0),
+                'timeline_missing_history_events' => ($timeline['evaluated'] ?? true) === true
+                    ? self::integer($timeline['missing_history_events'] ?? 0)
+                    : null,
                 'timeline_stale_projected_runs' => ($timeline['evaluated'] ?? true) === true
                     ? self::integer($timeline['stale_projected_runs'] ?? 0)
                     : null,
-                'timeline_orphaned' => self::integer($timeline['orphaned'] ?? 0),
+                'timeline_orphaned' => ($timeline['evaluated'] ?? true) === true
+                    ? self::integer($timeline['orphaned'] ?? 0)
+                    : null,
                 'timer_needs_rebuild' => $timerNeedsRebuild,
                 'timer_missing_runs_with_timers' => ($timers['evaluated'] ?? true) === true
                     ? self::integer($timers['missing_runs_with_timers'] ?? 0)
@@ -220,8 +226,12 @@ final class HealthCheck
                 'timer_schema_version_mismatch_runs' => ($timers['evaluated'] ?? true) === true
                     ? self::integer($timers['schema_version_mismatch_runs'] ?? 0)
                     : null,
-                'timer_schema_version_mismatch_rows' => self::integer($timers['schema_version_mismatch_rows'] ?? 0),
-                'timer_orphaned' => self::integer($timers['orphaned'] ?? 0),
+                'timer_schema_version_mismatch_rows' => ($timers['evaluated'] ?? true) === true
+                    ? self::integer($timers['schema_version_mismatch_rows'] ?? 0)
+                    : null,
+                'timer_orphaned' => ($timers['evaluated'] ?? true) === true
+                    ? self::integer($timers['orphaned'] ?? 0)
+                    : null,
                 'lineage_needs_rebuild' => $lineageNeedsRebuild,
                 'lineage_missing_runs_with_lineage' => ($lineage['evaluated'] ?? true) === true
                     ? self::integer($lineage['missing_runs_with_lineage'] ?? 0)
@@ -229,7 +239,9 @@ final class HealthCheck
                 'lineage_stale_projected_runs' => ($lineage['evaluated'] ?? true) === true
                     ? self::integer($lineage['stale_projected_runs'] ?? 0)
                     : null,
-                'lineage_orphaned' => self::integer($lineage['orphaned'] ?? 0),
+                'lineage_orphaned' => ($lineage['evaluated'] ?? true) === true
+                    ? self::integer($lineage['orphaned'] ?? 0)
+                    : null,
             ],
         );
     }

@@ -842,6 +842,8 @@ final class V2OperatorMetricsTest extends TestCase
 
         $this->assertSame(1, $snapshot['projections']['run_summaries']['missing']);
         $this->assertSame(1, $snapshot['projections']['run_timeline_entries']['history_events']);
+        $this->assertSame(0, $snapshot['projections']['run_waits']['summaries_with_open_waits']);
+        $this->assertSame(0, $snapshot['projections']['run_waits']['missing_current_open_waits']);
 
         foreach (['run_waits', 'run_timeline_entries', 'run_timer_entries', 'run_lineage_entries'] as $group) {
             $this->assertFalse($snapshot['projections'][$group]['evaluated']);
@@ -851,7 +853,11 @@ final class V2OperatorMetricsTest extends TestCase
             );
             $this->assertNull($snapshot['projections'][$group]['needs_rebuild']);
             $this->assertNull($snapshot['projections'][$group]['stale_projected_runs']);
+            $this->assertNull($snapshot['projections'][$group]['orphaned']);
         }
+
+        $this->assertNull($snapshot['projections']['run_timeline_entries']['missing_history_events']);
+        $this->assertNull($snapshot['projections']['run_timer_entries']['schema_version_mismatch_rows']);
 
         $health = HealthCheck::snapshot();
         $projection = collect($health['checks'])->firstWhere('name', 'selected_run_projections');
@@ -866,6 +872,35 @@ final class V2OperatorMetricsTest extends TestCase
             'run_timer_entries',
             'run_lineage_entries',
         ], $projection['data']['unevaluated_groups']);
+        $this->assertNull($projection['data']['run_waits_orphaned']);
+        $this->assertNull($projection['data']['timeline_missing_history_events']);
+        $this->assertNull($projection['data']['timeline_orphaned']);
+        $this->assertNull($projection['data']['timer_schema_version_mismatch_rows']);
+        $this->assertNull($projection['data']['timer_orphaned']);
+        $this->assertNull($projection['data']['lineage_orphaned']);
+
+        $unquotedQueries = array_map(
+            static fn (string $query): string => str_replace(['"', '`'], '', $query),
+            $queries,
+        );
+
+        $this->assertFalse(collect($unquotedQueries)->contains(
+            static fn (string $query): bool => str_contains($query, 'from workflow_history_events')
+                && str_contains($query, 'left join workflow_run_timeline_entries'),
+        ), 'Disabled metrics must not scan history for missing timeline projections.');
+        $this->assertFalse(collect($unquotedQueries)->contains(
+            static fn (string $query): bool => str_contains($query, 'left join workflow_runs')
+                && collect([
+                    'workflow_run_waits',
+                    'workflow_run_timeline_entries',
+                    'workflow_run_timer_entries',
+                    'workflow_run_lineage_entries',
+                ])->contains(static fn (string $table): bool => str_contains($query, "from {$table}")),
+        ), 'Disabled metrics must not scan selected projection tables for orphaned rows.');
+        $this->assertFalse(collect($unquotedQueries)->contains(
+            static fn (string $query): bool => str_contains($query, 'from workflow_run_timer_entries')
+                && str_contains($query, 'schema_version is null'),
+        ), 'Disabled metrics must not scan timer rows for schema-version mismatches.');
         $this->assertFalse(collect($queries)->contains(
             static fn (string $query): bool => preg_match(
                 '/^select \* from ["`]workflow_history_events["`]/',
