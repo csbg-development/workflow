@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace Tests\Unit\Migrations;
 
 use Illuminate\Database\Connection;
-use Illuminate\Database\Query\Grammars\MySqlGrammar;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Tests\SchemaTestCase;
@@ -127,6 +126,7 @@ final class ActivityTimeoutIndexMigrationTest extends SchemaTestCase
     public function testOnlineDdlRunsWhenOptionalTuningVariablesAreUnavailable(): void
     {
         $migration = require self::MIGRATION;
+        $grammar = DB::connection()->getQueryGrammar();
         $connection = $this->createMock(Connection::class);
         $statements = [];
         $connection->expects($this->once())
@@ -138,7 +138,7 @@ final class ActivityTimeoutIndexMigrationTest extends SchemaTestCase
                 ],
             ]);
         $connection->method('getQueryGrammar')
-            ->willReturn(new MySqlGrammar());
+            ->willReturn($grammar);
         $connection->expects($this->exactly(3))
             ->method('statement')
             ->willReturnCallback(static function (string $query, array $bindings = []) use (&$statements): bool {
