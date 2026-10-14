@@ -45,35 +45,58 @@ final class ActivityTimeoutEnforcer
         ?string $connection = null,
         ?string $queue = null,
     ): array {
+        if ($limit < 1) {
+            return [];
+        }
+
         $now = now();
         $deadlineBoundary = self::deadlineBoundary($now);
+        $candidates = [];
 
-        $query = ActivityExecution::query()
-            ->whereIn('status', [ActivityStatus::Pending->value, ActivityStatus::Running->value])
-            ->where(static function ($query) use ($deadlineBoundary): void {
-                $query->where(static function ($schedule) use ($deadlineBoundary): void {
-                    $schedule->where('status', ActivityStatus::Pending->value)
-                        ->whereNotNull('schedule_deadline_at')
-                        ->where('schedule_deadline_at', '<=', $deadlineBoundary);
-                })->orWhere(static function ($close) use ($deadlineBoundary): void {
-                    $close->where('status', ActivityStatus::Running->value)
-                        ->whereNotNull('close_deadline_at')
-                        ->where('close_deadline_at', '<=', $deadlineBoundary);
-                })->orWhere(static function ($scheduleToClose) use ($deadlineBoundary): void {
-                    $scheduleToClose->whereNotNull('schedule_to_close_deadline_at')
-                        ->where('schedule_to_close_deadline_at', '<=', $deadlineBoundary);
-                })->orWhere(static function ($heartbeat) use ($deadlineBoundary): void {
-                    $heartbeat->where('status', ActivityStatus::Running->value)
-                        ->whereNotNull('heartbeat_deadline_at')
-                        ->where('heartbeat_deadline_at', '<=', $deadlineBoundary);
-                });
-            })
-            ->limit($limit);
+        foreach ([
+            [[ActivityStatus::Pending->value], 'schedule_deadline_at'],
+            [[ActivityStatus::Running->value], 'close_deadline_at'],
+            [[ActivityStatus::Pending->value, ActivityStatus::Running->value], 'schedule_to_close_deadline_at'],
+            [[ActivityStatus::Running->value], 'heartbeat_deadline_at'],
+        ] as [$statuses, $deadlineColumn]) {
+            $query = ActivityExecution::query()
+                ->whereIn('status', $statuses)
+                ->whereNotNull($deadlineColumn)
+                ->where($deadlineColumn, '<=', $deadlineBoundary)
+                ->orderBy($deadlineColumn)
+                ->orderBy('id')
+                ->limit($limit);
 
-        RequestedTaskScope::apply($query, $connection, $queue);
+            RequestedTaskScope::apply($query, $connection, $queue);
 
-        return $query->pluck('id')
-            ->all();
+            foreach ($query->get(['id', $deadlineColumn]) as $execution) {
+                $deadline = $execution->{$deadlineColumn};
+
+                if (! $deadline instanceof CarbonInterface) {
+                    continue;
+                }
+
+                $candidate = [
+                    'id' => (string) $execution->id,
+                    'deadline' => $deadline->format('U.u'),
+                ];
+                $existing = $candidates[$candidate['id']] ?? null;
+
+                if ($existing === null || strcmp($candidate['deadline'], $existing['deadline']) < 0) {
+                    $candidates[$candidate['id']] = $candidate;
+                }
+            }
+        }
+
+        uasort($candidates, static function (array $left, array $right): int {
+            $deadlineComparison = strcmp($left['deadline'], $right['deadline']);
+
+            return $deadlineComparison !== 0
+                ? $deadlineComparison
+                : strcmp($left['id'], $right['id']);
+        });
+
+        return array_slice(array_keys($candidates), 0, $limit);
     }
 
     /**

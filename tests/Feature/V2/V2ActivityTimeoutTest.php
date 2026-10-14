@@ -444,6 +444,101 @@ final class V2ActivityTimeoutTest extends TestCase
         Carbon::setTestNow();
     }
 
+    public function testExpiredExecutionIdsUsesBoundedSingleDeadlineQueries(): void
+    {
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        try {
+            [, $execution] = $this->createRunningActivity(
+                instanceId: 'act-timeout-indexed-branches-1',
+                closeDeadlineAt: $startedAt->copy()
+                    ->subSeconds(10),
+            );
+            $execution->forceFill([
+                'heartbeat_deadline_at' => $startedAt->copy()
+                    ->subSeconds(5),
+            ])->save();
+            [, $scheduleToCloseExecution] = $this->createPendingActivity(
+                instanceId: 'act-timeout-indexed-branches-2',
+            );
+            $scheduleToCloseExecution->forceFill([
+                'schedule_to_close_deadline_at' => $startedAt->copy()
+                    ->subSeconds(3),
+            ])->save();
+
+            DB::flushQueryLog();
+            DB::enableQueryLog();
+
+            try {
+                $expiredIds = ActivityTimeoutEnforcer::expiredExecutionIds(limit: 2);
+                $queries = DB::getQueryLog();
+            } finally {
+                DB::disableQueryLog();
+            }
+
+            $this->assertContains($execution->id, $expiredIds);
+            $this->assertContains($scheduleToCloseExecution->id, $expiredIds);
+            $this->assertCount(2, $expiredIds);
+
+            $deadlineQueries = array_values(array_filter(
+                $queries,
+                static fn (array $query): bool => str_contains($query['query'], 'activity_executions')
+                    && str_contains($query['query'], 'deadline_at'),
+            ));
+
+            $this->assertCount(4, $deadlineQueries);
+
+            foreach ([
+                'schedule_deadline_at',
+                'close_deadline_at',
+                'schedule_to_close_deadline_at',
+                'heartbeat_deadline_at',
+            ] as $deadlineColumn) {
+                $matchingQueries = array_values(array_filter(
+                    $deadlineQueries,
+                    static fn (array $query): bool => preg_match(
+                        '/(?<![a-z_])' . preg_quote($deadlineColumn, '/') . '(?![a-z_])/',
+                        $query['query'],
+                    ) === 1,
+                ));
+
+                $this->assertCount(1, $matchingQueries, "Expected one bounded query for {$deadlineColumn}.");
+            }
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
+    public function testExpiredExecutionIdsPreservesDefaultQueueScopeAcrossDeadlineQueries(): void
+    {
+        $startedAt = Carbon::parse('2026-01-15 10:00:00');
+        Carbon::setTestNow($startedAt);
+
+        try {
+            [, $defaultExecution] = $this->createPendingActivity(
+                instanceId: 'act-timeout-default-scope-1',
+                scheduleDeadlineAt: $startedAt->copy()
+                    ->subSeconds(10),
+            );
+            [, $priorityExecution] = $this->createPendingActivity(
+                instanceId: 'act-timeout-priority-scope-1',
+                scheduleDeadlineAt: $startedAt->copy()
+                    ->subSeconds(10),
+            );
+            $priorityExecution->forceFill([
+                'queue' => 'priority',
+            ])->save();
+
+            $expiredIds = ActivityTimeoutEnforcer::expiredExecutionIds(queue: 'default');
+
+            $this->assertContains($defaultExecution->id, $expiredIds);
+            $this->assertNotContains($priorityExecution->id, $expiredIds);
+        } finally {
+            Carbon::setTestNow();
+        }
+    }
+
     public function testWatchdogPassDetectsAndEnforcesActivityTimeouts(): void
     {
         $startedAt = Carbon::parse('2026-01-15 10:00:00');
