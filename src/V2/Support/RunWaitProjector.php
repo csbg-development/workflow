@@ -120,6 +120,42 @@ final class RunWaitProjector
         $run->unsetRelation('waits');
     }
 
+    /**
+     * Update the single wait row owned by an activity transition. The event and
+     * execution already contain the canonical state needed for this row.
+     */
+    public static function projectActivityTransition(
+        WorkflowRun $run,
+        WorkflowTask $task,
+        WorkflowHistoryEvent $event,
+    ): void {
+        if (
+            $task->workflow_run_id !== $run->id
+            || $event->workflow_run_id !== $run->id
+        ) {
+            throw new \LogicException('Activity wait transition must belong to the projected workflow run.');
+        }
+
+        $wait = RunWaitView::forActivityEvent($event, $task);
+        $waitId = self::waitId($wait, 0);
+        $projectionId = self::projectionId($run->id, $waitId);
+        $waitModel = self::waitModel();
+        /** @var WorkflowRunWait|null $existing */
+        $existing = $waitModel::query()->find($projectionId);
+        $position = $existing?->position;
+
+        if ($position === null) {
+            $lastPosition = $waitModel::query()
+                ->where('workflow_run_id', $run->id)
+                ->max('position');
+            $position = is_numeric($lastPosition) ? ((int) $lastPosition) + 1 : 0;
+        }
+
+        self::upsertWait($run, $wait, $position, $existing);
+
+        $run->unsetRelation('waits');
+    }
+
     public static function hasPendingChildResolutionForTask(WorkflowRun $run, WorkflowTask $task): bool
     {
         $waitModel = self::waitModel();
@@ -130,6 +166,15 @@ final class RunWaitProjector
             ->where('task_id', $task->id)
             ->whereIn('status', ['resolved', 'cancelled'])
             ->whereIn('task_status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
+            ->exists();
+    }
+
+    public static function hasOpenWaitOtherThan(WorkflowRun $run, string $waitId): bool
+    {
+        return self::waitModel()::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('status', 'open')
+            ->where('wait_id', '!=', $waitId)
             ->exists();
     }
 
@@ -151,49 +196,11 @@ final class RunWaitProjector
         foreach (array_values($waits) as $displayPosition => $wait) {
             $waitId = self::waitId($wait, $displayPosition);
             $projectionId = self::projectionId($run->id, $waitId);
-            $payload = self::normalizedPayload($wait);
             $seen[] = $projectionId;
             $existingRow = $existing->get($projectionId);
             $position = $existingRow?->position ?? $nextPosition++;
 
-            /** @var WorkflowRunWait $row */
-            $row = IdempotentProjectionUpsert::upsert(
-                $waitModel,
-                [
-                    'id' => $projectionId,
-                ],
-                [
-                    'workflow_run_id' => $run->id,
-                    'workflow_instance_id' => $run->workflow_instance_id,
-                    'wait_id' => $waitId,
-                    'position' => $position,
-                    'kind' => self::stringValue($wait['kind'] ?? null) ?? 'unknown',
-                    'sequence' => self::intValue($wait['sequence'] ?? null),
-                    'status' => self::stringValue($wait['status'] ?? null) ?? 'unknown',
-                    'source_status' => self::stringValue($wait['source_status'] ?? null),
-                    'summary' => self::stringValue($wait['summary'] ?? null),
-                    'opened_at' => self::timestamp($wait['opened_at'] ?? null),
-                    'deadline_at' => self::timestamp($wait['deadline_at'] ?? null),
-                    'resolved_at' => self::timestamp($wait['resolved_at'] ?? null),
-                    'target_name' => self::stringValue($wait['target_name'] ?? null),
-                    'target_type' => self::stringValue($wait['target_type'] ?? null),
-                    'task_backed' => (bool) ($wait['task_backed'] ?? false),
-                    'external_only' => (bool) ($wait['external_only'] ?? false),
-                    'resume_source_kind' => self::stringValue($wait['resume_source_kind'] ?? null),
-                    'resume_source_id' => self::stringValue($wait['resume_source_id'] ?? null),
-                    'task_id' => self::stringValue($wait['task_id'] ?? null),
-                    'task_type' => self::stringValue($wait['task_type'] ?? null),
-                    'task_status' => self::stringValue($wait['task_status'] ?? null),
-                    'command_id' => self::stringValue($wait['command_id'] ?? null),
-                    'command_sequence' => self::intValue($wait['command_sequence'] ?? null),
-                    'command_status' => self::stringValue($wait['command_status'] ?? null),
-                    'command_outcome' => self::stringValue($wait['command_outcome'] ?? null),
-                    'history_authority' => self::stringValue($wait['history_authority'] ?? null),
-                    'history_unsupported_reason' => self::stringValue($wait['history_unsupported_reason'] ?? null),
-                    'payload' => $payload,
-                ],
-                $existingRow,
-            );
+            $row = self::upsertWait($run, $wait, $position, $existingRow);
 
             $projected[] = $row;
         }
@@ -263,6 +270,59 @@ final class RunWaitProjector
             'missing' => $hasCanonical && ! $hasProjection,
             'stale' => $hasProjection && ! self::projectionMatchesSnapshot($projected, $canonicalWaits),
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $wait
+     */
+    private static function upsertWait(
+        WorkflowRun $run,
+        array $wait,
+        int $position,
+        ?WorkflowRunWait $existing = null,
+    ): WorkflowRunWait {
+        $waitId = self::waitId($wait, $position);
+
+        /** @var WorkflowRunWait $row */
+        $row = IdempotentProjectionUpsert::upsert(
+            self::waitModel(),
+            [
+                'id' => self::projectionId($run->id, $waitId),
+            ],
+            [
+                'workflow_run_id' => $run->id,
+                'workflow_instance_id' => $run->workflow_instance_id,
+                'wait_id' => $waitId,
+                'position' => $position,
+                'kind' => self::stringValue($wait['kind'] ?? null) ?? 'unknown',
+                'sequence' => self::intValue($wait['sequence'] ?? null),
+                'status' => self::stringValue($wait['status'] ?? null) ?? 'unknown',
+                'source_status' => self::stringValue($wait['source_status'] ?? null),
+                'summary' => self::stringValue($wait['summary'] ?? null),
+                'opened_at' => self::timestamp($wait['opened_at'] ?? null),
+                'deadline_at' => self::timestamp($wait['deadline_at'] ?? null),
+                'resolved_at' => self::timestamp($wait['resolved_at'] ?? null),
+                'target_name' => self::stringValue($wait['target_name'] ?? null),
+                'target_type' => self::stringValue($wait['target_type'] ?? null),
+                'task_backed' => (bool) ($wait['task_backed'] ?? false),
+                'external_only' => (bool) ($wait['external_only'] ?? false),
+                'resume_source_kind' => self::stringValue($wait['resume_source_kind'] ?? null),
+                'resume_source_id' => self::stringValue($wait['resume_source_id'] ?? null),
+                'task_id' => self::stringValue($wait['task_id'] ?? null),
+                'task_type' => self::stringValue($wait['task_type'] ?? null),
+                'task_status' => self::stringValue($wait['task_status'] ?? null),
+                'command_id' => self::stringValue($wait['command_id'] ?? null),
+                'command_sequence' => self::intValue($wait['command_sequence'] ?? null),
+                'command_status' => self::stringValue($wait['command_status'] ?? null),
+                'command_outcome' => self::stringValue($wait['command_outcome'] ?? null),
+                'history_authority' => self::stringValue($wait['history_authority'] ?? null),
+                'history_unsupported_reason' => self::stringValue($wait['history_unsupported_reason'] ?? null),
+                'payload' => self::normalizedPayload($wait),
+            ],
+            $existing,
+        );
+
+        return $row;
     }
 
     private static function historyProjectionMaintenanceRole(): HistoryProjectionMaintenanceRole

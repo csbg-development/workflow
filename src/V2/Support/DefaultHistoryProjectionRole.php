@@ -32,10 +32,11 @@ final class DefaultHistoryProjectionRole implements HistoryProjectionRole, Histo
         ActivityAttempt $attempt,
         WorkflowTask $task,
     ): WorkflowRunSummary {
-        $parallelMetadataPath = ParallelChildGroup::metadataPathForSequence($run, (int) $execution->sequence);
+        $parallelMetadataPath = ActivityProjectionContext::parallelMetadataPath($run, $execution)
+            ?? ParallelChildGroup::metadataPathForSequence($run, (int) $execution->sequence);
         $parallelMetadata = ParallelChildGroup::payloadForPath($parallelMetadataPath);
 
-        WorkflowHistoryEvent::record($run, HistoryEventType::ActivityStarted, array_merge([
+        $event = WorkflowHistoryEvent::record($run, HistoryEventType::ActivityStarted, array_merge([
             'activity_execution_id' => $execution->id,
             'activity_attempt_id' => $attempt->id,
             'activity_class' => $execution->activity_class,
@@ -54,7 +55,20 @@ final class DefaultHistoryProjectionRole implements HistoryProjectionRole, Histo
             (int) $attempt->attempt_number,
         );
 
-        return $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']) ?? $run);
+        if ($parallelMetadataPath !== []) {
+            return $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']) ?? $run);
+        }
+
+        $projectedRun = $run->fresh() ?? $run;
+
+        return ActivityProjectionContext::run(
+            $projectedRun,
+            $execution,
+            $task,
+            $task,
+            $event,
+            fn (): WorkflowRunSummary => $this->projectRun($projectedRun),
+        );
     }
 
     public function pruneStaleProjectionRowsForRun(

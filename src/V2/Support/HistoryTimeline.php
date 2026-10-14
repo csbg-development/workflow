@@ -85,6 +85,35 @@ final class HistoryTimeline
         return self::mapEvent($event, collect(), collect(), collect(), collect(), $failures);
     }
 
+    /**
+     * Map one self-describing activity event without loading any other event or
+     * mutable row from the run.
+     *
+     * @return array<string, mixed>
+     */
+    public static function fromActivityEvent(WorkflowHistoryEvent $event): array
+    {
+        if (! in_array($event->event_type, [
+            HistoryEventType::ActivityScheduled,
+            HistoryEventType::ActivityStarted,
+            HistoryEventType::ActivityHeartbeatRecorded,
+            HistoryEventType::ActivityRetryScheduled,
+            HistoryEventType::ActivityCompleted,
+            HistoryEventType::ActivityFailed,
+        ], true)) {
+            throw new \LogicException('Incremental activity timeline projection requires an activity transition.');
+        }
+
+        $failure = FailureSnapshots::forSelfDescribingEvent($event);
+        $failures = is_string($failure['id'] ?? null)
+            ? collect([
+                $failure['id'] => $failure,
+            ])
+            : collect();
+
+        return self::mapEvent($event, collect(), collect(), collect(), collect(), $failures);
+    }
+
     private static function mapEvent(
         WorkflowHistoryEvent $event,
         Collection $commands,
@@ -829,7 +858,7 @@ final class HistoryTimeline
                 ? self::timestamp(self::stringValue($snapshot['closed_at'] ?? null) ?? $activity?->closed_at)
                 : null,
             'last_heartbeat_at' => self::timestamp(self::stringValue($snapshot['last_heartbeat_at'] ?? null))
-                ?? self::timestamp($activity?->last_heartbeat_at),
+                ?? ($snapshot === null ? self::timestamp($activity?->last_heartbeat_at) : null),
             'last_heartbeat_progress' => HeartbeatProgress::fromStored(
                 $snapshot['last_heartbeat_progress'] ?? ($payload['progress'] ?? null),
             ),

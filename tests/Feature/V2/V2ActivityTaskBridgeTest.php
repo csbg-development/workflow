@@ -26,7 +26,10 @@ use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowRun;
+use Workflow\V2\Models\WorkflowRunSummary;
+use Workflow\V2\Models\WorkflowRunWait;
 use Workflow\V2\Models\WorkflowTask;
+use Workflow\V2\Models\WorkflowTimelineEntry;
 use Workflow\V2\Support\ActivityRecovery;
 use Workflow\V2\Support\ActivitySnapshot;
 use Workflow\V2\Support\DefaultActivityTaskBridge;
@@ -249,6 +252,56 @@ final class V2ActivityTaskBridgeTest extends TestCase
         ));
         $this->assertNotNull($result['lease_expires_at']);
         $this->assertNull($result['reason']);
+    }
+
+    public function testActivityStartAndHeartbeatProjectionsStayBoundedAndMatchFullRebuild(): void
+    {
+        [$run, $execution, $task] = $this->createActivityTask();
+        $execution->forceFill([
+            'parallel_group_path' => [],
+        ])->save();
+
+        for ($sequence = 1; $sequence <= 40; $sequence++) {
+            WorkflowHistoryEvent::record($run, HistoryEventType::SideEffectRecorded, [
+                'sequence' => $sequence,
+                'result' => "historical-value-{$sequence}",
+            ]);
+        }
+
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $claim = $this->bridge->claimStatus($task->id, 'bounded-worker');
+        $claimQueries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($claim['claimed']);
+        $this->assertFalse($this->hasUnboundedHistoryProjectionQuery($claimQueries));
+        $this->assertFalse($this->hasFullTimelineRead($claimQueries));
+        $this->assertFalse($this->hasActivityHistoryJsonLookup($claimQueries));
+
+        $boundedStart = $this->projectionStateForRun($run);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($boundedStart, $this->projectionStateForRun($run));
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $heartbeat = $this->bridge->heartbeat($claim['activity_attempt_id'], [
+            'current' => 1,
+            'total' => 2,
+        ]);
+        $heartbeatQueries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($heartbeat['heartbeat_recorded']);
+        $this->assertFalse($this->hasUnboundedHistoryProjectionQuery($heartbeatQueries));
+        $this->assertFalse($this->hasFullTimelineRead($heartbeatQueries));
+        $this->assertFalse($this->hasActivityHistoryJsonLookup($heartbeatQueries));
+
+        $boundedHeartbeat = $this->projectionStateForRun($run);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($boundedHeartbeat, $this->projectionStateForRun($run));
     }
 
     public function testClaimStatusUsesHistoryProjectionRoleBinding(): void
@@ -958,6 +1011,101 @@ final class V2ActivityTaskBridgeTest extends TestCase
     }
 
     // -- Helpers --
+
+    /**
+     * @param list<array{query: string, bindings: array<mixed>, time: float|null}> $queries
+     */
+    private function hasUnboundedHistoryProjectionQuery(array $queries): bool
+    {
+        return collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            if (
+                str_contains($sql, 'workflow_history_events')
+                && (str_contains($sql, 'sum(') || str_contains($sql, 'row_number('))
+            ) {
+                return true;
+            }
+
+            return str_starts_with(ltrim($sql), 'select')
+                && str_contains($sql, 'workflow_history_events')
+                && ! str_contains($sql, 'count(*)')
+                && ! str_contains($sql, 'select max(')
+                && ! str_contains($sql, 'limit 1');
+        });
+    }
+
+    /**
+     * @param list<array{query: string, bindings: array<mixed>, time: float|null}> $queries
+     */
+    private function hasFullTimelineRead(array $queries): bool
+    {
+        return collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_starts_with(ltrim($sql), 'select')
+                && str_contains($sql, 'workflow_run_timeline_entries')
+                && str_contains($sql, 'workflow_run_id');
+        });
+    }
+
+    /**
+     * @param list<array{query: string, bindings: array<mixed>, time: float|null}> $queries
+     */
+    private function hasActivityHistoryJsonLookup(array $queries): bool
+    {
+        return collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_contains($sql, 'workflow_history_events')
+                && str_contains($sql, 'activity_execution_id')
+                && (str_contains($sql, 'json_') || str_contains($sql, '->'));
+        });
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function projectionStateForRun(WorkflowRun $run): array
+    {
+        $summary = WorkflowRunSummary::query()->findOrFail($run->id)->attributesToArray();
+        unset($summary['created_at'], $summary['updated_at']);
+
+        return $this->normalizeProjectionValue([
+            'summary' => $summary,
+            'waits' => WorkflowRunWait::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('position')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowRunWait $wait): array => $wait->toWaitPayload())
+                ->all(),
+            'timeline' => WorkflowTimelineEntry::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('sequence')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowTimelineEntry $entry): array => $entry->toTimelinePayload())
+                ->all(),
+        ]);
+    }
+
+    private function normalizeProjectionValue(mixed $value): mixed
+    {
+        if ($value instanceof \Carbon\CarbonInterface) {
+            return $value->toJSON();
+        }
+
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(fn (mixed $nested): mixed => $this->normalizeProjectionValue($nested), $value);
+    }
 
     /**
      * @param array<string, mixed> $taskOverrides

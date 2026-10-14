@@ -1312,7 +1312,17 @@ final class V2WorkflowTest extends TestCase
             ->where('status', TaskStatus::Ready->value)
             ->firstOrFail();
 
+        $execution = ActivityExecution::query()
+            ->where('workflow_run_id', $runId)
+            ->sole();
+        $this->assertSame([], $execution->parallel_group_path);
+        $this->assertNotNull($execution->getRawOriginal('parallel_group_path'));
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
         $claim = ActivityTaskBridge::claim($task->id, 'external-worker-1');
+        $claimQueries = DB::getQueryLog();
+        DB::disableQueryLog();
 
         $this->assertIsArray($claim);
         $this->assertSame($task->id, $claim['task_id']);
@@ -1320,6 +1330,13 @@ final class V2WorkflowTest extends TestCase
         $this->assertSame('activity-bridge-complete', $claim['workflow_instance_id']);
         $this->assertSame('external-worker-1', $claim['lease_owner']);
         $this->assertSame(1, $claim['attempt_number']);
+        $this->assertFalse(collect($claimQueries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_contains($sql, 'workflow_history_events')
+                && str_contains($sql, 'activity_execution_id')
+                && (str_contains($sql, 'json_') || str_contains($sql, '->'));
+        }));
         $this->assertIsString($claim['arguments']);
         $this->assertSame(['Taylor'], Serializer::unserializeWithCodec(
             $claim['payload_codec'],
@@ -1364,10 +1381,7 @@ final class V2WorkflowTest extends TestCase
         $this->assertNull($outcome['reason']);
         $this->assertNotNull($outcome['next_task_id']);
 
-        /** @var ActivityExecution $execution */
-        $execution = ActivityExecution::query()
-            ->where('workflow_run_id', $runId)
-            ->firstOrFail();
+        $execution->refresh();
         /** @var ActivityAttempt $attempt */
         $attempt = ActivityAttempt::query()
             ->whereKey($claim['activity_attempt_id'])

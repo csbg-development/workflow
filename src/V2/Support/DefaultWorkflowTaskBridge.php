@@ -1177,11 +1177,83 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             $createdTaskIds[] = $nextMessageTask->id;
         }
 
+        if (self::projectSingleScheduledActivity($run, $task, $nonTerminalCommands, $createdTaskIds)) {
+            return;
+        }
+
         if (self::commandsIncludeChildWorkflowStart($nonTerminalCommands)) {
             self::projectRunBestEffort($run, self::PROJECTION_RUN_RELATIONS_WITH_HISTORY, 'child_workflow_parent_wait');
         } else {
             self::projectRun($run, self::PROJECTION_RUN_RELATIONS_WITH_HISTORY);
         }
+    }
+
+    /**
+     * Project the common one-activity workflow transition from the rows just
+     * written by this transaction. More complex command batches retain the
+     * full reconciliation path.
+     *
+     * @param list<array{type: string, ...}> $commands
+     * @param list<string> $createdTaskIds
+     */
+    private static function projectSingleScheduledActivity(
+        WorkflowRun $run,
+        WorkflowTask $sourceTask,
+        array $commands,
+        array $createdTaskIds,
+    ): bool {
+        if (
+            count($commands) !== 1
+            || ($commands[0]['type'] ?? null) !== 'schedule_activity'
+            || count($createdTaskIds) !== 1
+        ) {
+            return false;
+        }
+
+        /** @var WorkflowTask|null $activityTask */
+        $activityTask = ConfiguredV2Models::query('task_model', WorkflowTask::class)
+            ->find($createdTaskIds[0]);
+        $activityExecutionId = is_array($activityTask?->payload)
+            ? self::nonEmptyString($activityTask->payload['activity_execution_id'] ?? null)
+            : null;
+
+        if (! $activityTask instanceof WorkflowTask || $activityExecutionId === null) {
+            return false;
+        }
+
+        /** @var ActivityExecution|null $execution */
+        $execution = ConfiguredV2Models::query('activity_execution_model', ActivityExecution::class)
+            ->where('workflow_run_id', $run->id)
+            ->find($activityExecutionId);
+        /** @var WorkflowHistoryEvent|null $event */
+        $event = ConfiguredV2Models::query('history_event_model', WorkflowHistoryEvent::class)
+            ->where('workflow_run_id', $run->id)
+            ->where('workflow_task_id', $sourceTask->id)
+            ->where('event_type', HistoryEventType::ActivityScheduled->value)
+            ->orderByDesc('sequence')
+            ->limit(1)
+            ->first();
+
+        if (
+            ! $execution instanceof ActivityExecution
+            || ! $event instanceof WorkflowHistoryEvent
+            || ($event->payload['activity_execution_id'] ?? null) !== $execution->id
+            || ParallelChildGroup::metadataPathFromPayload(is_array($event->payload) ? $event->payload : []) !== []
+            || RunWaitProjector::hasOpenWaitOtherThan($run, sprintf('activity:%s', $execution->id))
+        ) {
+            return false;
+        }
+
+        ActivityProjectionContext::run(
+            $run,
+            $execution,
+            $sourceTask,
+            $activityTask,
+            $event,
+            static fn () => self::projectRun($run),
+        );
+
+        return true;
     }
 
     /**
@@ -2487,6 +2559,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             is_array($command['retry_policy'] ?? null) ? $command['retry_policy'] : null,
             $options,
         );
+        $parallelMetadata = self::parallelMetadataForCommand($command);
 
         /** @var ActivityExecution $execution */
         $execution = ActivityExecution::query()->create([
@@ -2501,6 +2574,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'connection' => $connection,
             'queue' => $queue,
             'retry_policy' => $retryPolicy,
+            'parallel_group_path' => is_array($parallelMetadata) ? null : [],
             'activity_options' => $options?->toSnapshot(),
             'schedule_deadline_at' => $scheduleDeadlineAt,
             'schedule_to_close_deadline_at' => $scheduleToCloseDeadlineAt,
@@ -2512,7 +2586,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             'activity_type' => $activityType,
             'sequence' => $sequence,
             'activity' => ActivitySnapshot::fromExecution($execution),
-            ...self::parallelMetadataForCommand($command),
+            ...($parallelMetadata ?? []),
         ], $task);
 
         /** @var WorkflowTask $activityTask */

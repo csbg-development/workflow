@@ -4,6 +4,9 @@ declare(strict_types=1);
 
 namespace Tests\Feature\V2;
 
+use Carbon\CarbonInterface;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Str;
 use RuntimeException;
 use Tests\Fixtures\V2\TestGreetingActivity;
@@ -23,7 +26,9 @@ use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
+use Workflow\V2\Models\WorkflowRunWait;
 use Workflow\V2\Models\WorkflowTask;
+use Workflow\V2\Models\WorkflowTimelineEntry;
 use Workflow\V2\Support\ActivityOutcomeRecorder;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\ParallelChildGroup;
@@ -60,6 +65,169 @@ use Workflow\V2\Support\ParallelChildGroup;
  */
 final class V2ActivityOutcomeHistoryRoleTest extends TestCase
 {
+    public function testSuccessfulActivityOutcomeProjectionDoesNotReloadGrowingHistoryOrTimeline(): void
+    {
+        [$run, , , $attempt] = $this->scaffoldLeasedAttempt(instanceId: 'activity-outcome-bounded-projection');
+
+        for ($sequence = 2; $sequence <= 42; $sequence++) {
+            WorkflowHistoryEvent::record($run, HistoryEventType::SideEffectRecorded, [
+                'sequence' => $sequence,
+                'result' => "historical-value-{$sequence}",
+            ]);
+        }
+
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        $retrievedHistoryEvents = 0;
+        Event::listen(
+            'eloquent.retrieved: ' . WorkflowHistoryEvent::class,
+            static function () use (&$retrievedHistoryEvents): void {
+                $retrievedHistoryEvents++;
+            },
+        );
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $outcome = ActivityOutcomeRecorder::recordForAttempt($attempt->id, 'hello', null);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($outcome['recorded']);
+        $this->assertSame(0, $retrievedHistoryEvents);
+        $this->assertFalse($this->hasBroadHistorySelect($queries));
+        $this->assertFalse(collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_starts_with(ltrim($sql), 'select')
+                && str_contains($sql, 'workflow_run_timeline_entries')
+                && str_contains($sql, 'workflow_run_id');
+        }));
+
+        $completion = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityCompleted->value)
+            ->sole();
+        $this->assertTrue(WorkflowTimelineEntry::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('history_event_id', $completion->id)
+            ->exists());
+
+        $boundedProjection = $this->projectionSnapshot($run);
+
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        $this->assertSame($boundedProjection, $this->projectionSnapshot($run));
+    }
+
+    public function testRetryActivityOutcomeProjectionIsBoundedAndIdempotent(): void
+    {
+        [$run, , , $attempt] = $this->scaffoldLeasedAttempt(
+            instanceId: 'activity-retry-bounded-projection',
+            maxAttempts: 2,
+        );
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $outcome = ActivityOutcomeRecorder::recordForAttempt(
+            $attempt->id,
+            null,
+            new RuntimeException('retry once'),
+        );
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($outcome['recorded']);
+        $this->assertInstanceOf(WorkflowTask::class, $outcome['next_task']);
+        $this->assertSame(TaskType::Activity, $outcome['next_task']->task_type);
+        $this->assertFalse($this->hasBroadHistorySelect($queries));
+
+        $summary = WorkflowRunSummary::query()->findOrFail($run->id);
+        $this->assertSame('activity', $summary->wait_kind);
+        $this->assertSame($outcome['next_task']->id, $summary->next_task_id);
+        $this->assertSame(TaskStatus::Ready->value, $summary->next_task_status);
+        $this->assertSame(0, $summary->exception_count);
+
+        $boundedProjection = $this->projectionSnapshot($run);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($boundedProjection, $this->projectionSnapshot($run));
+
+        $lateReplay = ActivityOutcomeRecorder::recordForAttempt(
+            $attempt->id,
+            null,
+            new RuntimeException('replayed retry'),
+        );
+
+        $this->assertFalse($lateReplay['recorded']);
+        $this->assertSame('stale_attempt', $lateReplay['reason']);
+        $this->assertSame(1, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityRetryScheduled->value)
+            ->count());
+    }
+
+    public function testFinalActivityFailureProjectionIsBoundedAndMatchesFullRebuild(): void
+    {
+        [$run, , , $attempt] = $this->scaffoldLeasedAttempt(instanceId: 'activity-failure-bounded-projection');
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $outcome = ActivityOutcomeRecorder::recordForAttempt(
+            $attempt->id,
+            null,
+            new RuntimeException('final activity failure'),
+        );
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($outcome['recorded']);
+        $this->assertInstanceOf(WorkflowTask::class, $outcome['next_task']);
+        $this->assertFalse($this->hasBroadHistorySelect($queries));
+
+        $failureEvent = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityFailed->value)
+            ->sole();
+        $summary = WorkflowRunSummary::query()->findOrFail($run->id);
+        $this->assertSame(1, $summary->exception_count);
+        $this->assertSame('workflow-task', $summary->wait_kind);
+        $this->assertTrue(WorkflowTimelineEntry::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('history_event_id', $failureEvent->id)
+            ->exists());
+
+        $boundedProjection = $this->projectionSnapshot($run);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($boundedProjection, $this->projectionSnapshot($run));
+    }
+
+    public function testActivityProjectionFallsBackWhenExistingHistoryCountersAreIncomplete(): void
+    {
+        [$run, , , $attempt] = $this->scaffoldLeasedAttempt(
+            instanceId: 'activity-projection-incomplete-budget-fallback',
+        );
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        WorkflowRunSummary::query()->whereKey($run->id)->update([
+            'history_size_bytes' => 0,
+        ]);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        $outcome = ActivityOutcomeRecorder::recordForAttempt($attempt->id, 'hello', null);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+
+        $this->assertTrue($outcome['recorded']);
+        $this->assertTrue($this->hasBroadHistorySelect($queries));
+
+        $repairedProjection = $this->projectionSnapshot($run);
+        $this->assertGreaterThan(0, $repairedProjection['summary']['history_size_bytes']);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($repairedProjection, $this->projectionSnapshot($run));
+    }
+
     public function testCancelledRunPathUsesHistoryProjectionRoleBinding(): void
     {
         [$run, , $task, $attempt] = $this->scaffoldLeasedAttempt(instanceId: 'issue-678-history-role-cancelled');
@@ -586,6 +754,29 @@ final class V2ActivityOutcomeHistoryRoleTest extends TestCase
     }
 
     /**
+     * @param list<array{query: string, bindings: array<mixed>, time: float|null}> $queries
+     */
+    private function hasBroadHistorySelect(array $queries): bool
+    {
+        return collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            if (
+                str_contains($sql, 'workflow_history_events')
+                && (str_contains($sql, 'sum(') || str_contains($sql, 'row_number('))
+            ) {
+                return true;
+            }
+
+            return str_starts_with(ltrim($sql), 'select')
+                && str_contains($sql, 'workflow_history_events')
+                && ! str_contains($sql, 'count(*)')
+                && ! str_contains($sql, 'select max(')
+                && ! str_contains($sql, 'limit 1');
+        });
+    }
+
+    /**
      * @return object{calls: array<int, array{0: string, 1: string}>}
      */
     private function bindRecordingRole(): object
@@ -671,6 +862,7 @@ final class V2ActivityOutcomeHistoryRoleTest extends TestCase
             'arguments' => Serializer::serializeWithCodec($pinnedCodec, ['Taylor']),
             'connection' => null,
             'queue' => null,
+            'parallel_group_path' => [],
             'started_at' => $now,
             'retry_policy' => [
                 'snapshot_version' => 1,
@@ -730,6 +922,50 @@ final class V2ActivityOutcomeHistoryRoleTest extends TestCase
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    private function projectionSnapshot(WorkflowRun $run): array
+    {
+        $summary = WorkflowRunSummary::query()->findOrFail($run->id)->attributesToArray();
+        unset($summary['created_at'], $summary['updated_at']);
+
+        return $this->normalizeProjectionValue([
+            'summary' => $summary,
+            'waits' => WorkflowRunWait::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('position')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowRunWait $wait): array => $wait->toWaitPayload())
+                ->all(),
+            'timeline' => WorkflowTimelineEntry::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('sequence')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowTimelineEntry $entry): array => $entry->toTimelinePayload())
+                ->all(),
+        ]);
+    }
+
+    private function normalizeProjectionValue(mixed $value): mixed
+    {
+        if ($value instanceof CarbonInterface) {
+            return $value->toJSON();
+        }
+
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(fn (mixed $nested): mixed => $this->normalizeProjectionValue($nested), $value);
+    }
+
+    /**
      * Scaffold the leased attempt at sequence 1 with parallel-group metadata,
      * plus a sibling activity execution at sequence 2 left in Running status so
      * `ParallelChildGroup::shouldWakeParentOnActivityClosure` returns false and
@@ -783,6 +1019,9 @@ final class V2ActivityOutcomeHistoryRoleTest extends TestCase
             index: 0,
             kind: 'activity',
         );
+        $execution->forceFill([
+            'parallel_group_path' => $parallelMetadata['parallel_group_path'],
+        ])->save();
 
         WorkflowHistoryEvent::record($run, HistoryEventType::ActivityScheduled, array_merge([
             'activity_execution_id' => $execution->id,

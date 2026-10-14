@@ -2111,7 +2111,7 @@ final class WorkflowExecutor
             'arguments' => $storedArguments,
             'connection' => RoutingResolver::activityConnection($activityCall->activity, $run, $options),
             'queue' => RoutingResolver::activityQueue($activityCall->activity, $run, $options),
-            'parallel_group_path' => self::parallelGroupPath($parallelMetadata),
+            'parallel_group_path' => self::parallelGroupPath($parallelMetadata) ?? [],
             'activity_options' => $options?->toSnapshot(),
             'schedule_deadline_at' => $scheduleDeadlineAt,
             'schedule_to_close_deadline_at' => $scheduleToCloseDeadlineAt,

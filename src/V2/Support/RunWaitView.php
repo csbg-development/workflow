@@ -17,6 +17,26 @@ use Workflow\V2\Models\WorkflowTask;
 final class RunWaitView
 {
     /**
+     * Build the canonical wait for one self-describing activity event.
+     *
+     * @return array<string, mixed>
+     */
+    public static function forActivityEvent(WorkflowHistoryEvent $event, WorkflowTask $task): array
+    {
+        $activity = ActivitySnapshot::fromEvent($event);
+
+        if (! is_array($activity) || ! is_string($activity['id'] ?? null)) {
+            throw new \LogicException('Activity wait projection requires a self-describing activity event.');
+        }
+
+        $activity['history_authority'] = RunActivityView::HISTORY_AUTHORITY_TYPED;
+        $activity['history_unsupported_reason'] = null;
+        $activity['row_status'] = null;
+
+        return self::activityWait($activity, $task);
+    }
+
+    /**
      * @param list<array<string, mixed>>|null $activities Metadata already derived for this projection pass.
      * @param list<array<string, mixed>>|null $timers
      * @return list<array<string, mixed>>

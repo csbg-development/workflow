@@ -198,6 +198,7 @@ final class StandaloneActivityStartService
                 'payload_codec' => $payloadCodec,
                 'connection' => null,
                 'queue' => $taskQueue,
+                'parallel_group_path' => [],
                 'retry_policy' => $retryPolicySnapshot,
                 'activity_options' => $activityOptions->toSnapshot(),
                 'schedule_deadline_at' => $scheduleToStartDeadlineAt,

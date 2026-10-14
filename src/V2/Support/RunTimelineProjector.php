@@ -83,6 +83,28 @@ final class RunTimelineProjector
         return $row;
     }
 
+    public static function projectActivityEvent(
+        WorkflowRun $run,
+        WorkflowHistoryEvent $event,
+    ): WorkflowTimelineEntry {
+        if ($event->workflow_run_id !== $run->id) {
+            throw new \LogicException('Timeline event must belong to the projected workflow run.');
+        }
+
+        $historyEventId = (string) $event->id;
+        $row = self::upsertEntry(
+            $run,
+            self::entryModel(),
+            self::projectionId($run->id, $historyEventId),
+            $historyEventId,
+            HistoryTimeline::fromActivityEvent($event),
+        );
+
+        $run->unsetRelation('timelineEntries');
+
+        return $row;
+    }
+
     /**
      * @return array{source: string, timeline: list<array<string, mixed>>, total_count: int}
      */

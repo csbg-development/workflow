@@ -12,6 +12,7 @@ use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Enums\TaskStatus;
 use Workflow\V2\Enums\TaskType;
+use Workflow\V2\Models\ActivityExecution;
 use Workflow\V2\Models\WorkflowFailure;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
@@ -43,6 +44,22 @@ final class RunSummaryProjector
 
         if ($childResolution !== null) {
             return self::projectOpenWorkflowTask($run, $childResolution['task'], [$childResolution['event']]);
+        }
+
+        $activityProjection = ActivityProjectionContext::projectionFor($run);
+
+        if ($activityProjection !== null) {
+            $summary = self::projectActivityTransition(
+                $run,
+                $activityProjection['execution'],
+                $activityProjection['source_task'],
+                $activityProjection['next_task'],
+                $activityProjection['event'],
+            );
+
+            if ($summary instanceof WorkflowRunSummary) {
+                return $summary;
+            }
         }
 
         $fastSummary = self::projectFreshWorkflowTaskRun($run);
@@ -464,6 +481,129 @@ final class RunSummaryProjector
         return self::projectOpenWorkflowTask($run, $task, $childResolutionEvents);
     }
 
+    private static function projectActivityTransition(
+        WorkflowRun $run,
+        ActivityExecution $execution,
+        WorkflowTask $sourceTask,
+        WorkflowTask $nextTask,
+        WorkflowHistoryEvent $event,
+    ): ?WorkflowRunSummary {
+        $summaryModel = self::summaryModel();
+        /** @var WorkflowRunSummary|null $existingSummary */
+        $existingSummary = $summaryModel::query()->find($run->id);
+
+        if (
+            $run->status->isTerminal()
+            || ! $existingSummary instanceof WorkflowRunSummary
+            || (int) ($existingSummary->projection_schema_version ?? 0) !== self::SCHEMA_VERSION
+            || $execution->workflow_run_id !== $run->id
+            || $sourceTask->workflow_run_id !== $run->id
+            || $nextTask->workflow_run_id !== $run->id
+            || $event->workflow_run_id !== $run->id
+        ) {
+            return null;
+        }
+
+        $previousHistoryCount = max(0, (int) $existingSummary->history_event_count);
+        $historyBudget = HistoryBudget::afterAppendedEvent($run, $existingSummary, $event);
+
+        if ($historyBudget === null) {
+            return null;
+        }
+
+        if ($nextTask->task_type === TaskType::Workflow) {
+            if (! in_array($event->event_type, [
+                HistoryEventType::ActivityCompleted,
+                HistoryEventType::ActivityFailed,
+            ], true)) {
+                return null;
+            }
+
+            $summary = self::projectOpenWorkflowTask($run, $nextTask, [], $historyBudget, true);
+        } elseif ($nextTask->task_type === TaskType::Activity) {
+            if (
+                ! in_array($event->event_type, [
+                    HistoryEventType::ActivityScheduled,
+                    HistoryEventType::ActivityStarted,
+                    HistoryEventType::ActivityHeartbeatRecorded,
+                    HistoryEventType::ActivityRetryScheduled,
+                ], true)
+                || ! in_array($execution->status, [ActivityStatus::Pending, ActivityStatus::Running], true)
+                || ! in_array($nextTask->status, [TaskStatus::Ready, TaskStatus::Leased], true)
+            ) {
+                return null;
+            }
+
+            [$livenessState, $livenessReason] = self::taskLiveness($nextTask, $run, 'Activity');
+            $repairBlockedReason = RepairBlockedReason::forRun(
+                $run,
+                (bool) $existingSummary->is_current_run,
+                $livenessState,
+                false,
+            );
+            $activityType = self::activityType([
+                'type' => $execution->activity_type,
+                'class' => $execution->activity_class,
+            ]);
+            $statusBucket = $run->status->statusBucket();
+
+            /** @var WorkflowRunSummary $summary */
+            $summary = IdempotentProjectionUpsert::upsert(
+                $summaryModel,
+                [
+                    'id' => $run->id,
+                ],
+                [
+                    'wait_kind' => 'activity',
+                    'wait_reason' => sprintf('Waiting for activity %s', $activityType),
+                    'wait_started_at' => $execution->started_at ?? $execution->created_at,
+                    'wait_deadline_at' => null,
+                    'open_wait_id' => sprintf('activity:%s', $execution->id),
+                    'resume_source_kind' => 'activity_execution',
+                    'resume_source_id' => $execution->id,
+                    'next_task_at' => $nextTask->available_at,
+                    'liveness_state' => $livenessState,
+                    'liveness_reason' => $livenessReason,
+                    'next_task_id' => $nextTask->id,
+                    'next_task_type' => $nextTask->task_type->value,
+                    'next_task_status' => $nextTask->status->value,
+                    'next_task_lease_expires_at' => $nextTask->lease_expires_at,
+                    'repair_blocked_reason' => $repairBlockedReason,
+                    'repair_attention' => RepairBlockedReason::needsAttention($repairBlockedReason),
+                    'task_problem' => self::hasActionableTransportFailure($nextTask)
+                        || TaskRepairPolicy::dispatchOverdue($nextTask)
+                        || self::taskWaitingForCompatibleWorker($nextTask, $run),
+                    'history_event_count' => $historyBudget['history_event_count'],
+                    'history_size_bytes' => $historyBudget['history_size_bytes'],
+                    'history_fan_out' => $historyBudget['history_fan_out'],
+                    'continue_as_new_recommended' => $historyBudget['continue_as_new_recommended'],
+                    'history_budget_pressure' => $historyBudget['pressure'],
+                    'status' => $run->status->value,
+                    'status_bucket' => $statusBucket->value,
+                    'updated_at' => $run->last_progress_at ?? $run->updated_at,
+                ],
+                $existingSummary,
+            );
+        } else {
+            return null;
+        }
+
+        if (
+            $event->event_type === HistoryEventType::ActivityFailed
+            && $previousHistoryCount < (int) $event->sequence
+        ) {
+            $summary->forceFill([
+                'exception_count' => ((int) $existingSummary->exception_count) + 1,
+            ])->save();
+        }
+
+        $waitTask = $nextTask->task_type === TaskType::Activity ? $nextTask : $sourceTask;
+        RunWaitProjector::projectActivityTransition($run, $waitTask, $event);
+        RunTimelineProjector::projectActivityEvent($run, $event);
+
+        return $summary;
+    }
+
     /**
      * Apply one open workflow task and the bounded child resolutions assigned
      * to it. Resolution effects are idempotent and are normally projected as
@@ -476,6 +616,8 @@ final class RunSummaryProjector
         WorkflowRun $run,
         WorkflowTask $task,
         array $childResolutionEvents,
+        ?array $historyBudget = null,
+        bool $forceWorkflowTaskWait = false,
     ): WorkflowRunSummary {
         if (
             $run->status->isTerminal()
@@ -486,7 +628,7 @@ final class RunSummaryProjector
             throw new \LogicException('Bounded workflow-task projection requires an open task on an open run.');
         }
 
-        $historyBudget = HistoryBudget::forRunBounded($run);
+        $historyBudget ??= HistoryBudget::forRunBounded($run);
         $summaryModel = self::summaryModel();
 
         /** @var WorkflowRunSummary|null $existingSummary */
@@ -498,9 +640,10 @@ final class RunSummaryProjector
         [$taskLivenessState, $taskLivenessReason] = self::taskLiveness(
             $task,
             $run,
-            self::claimTaskLabel($existingSummary, $task),
+            $forceWorkflowTaskWait ? 'Workflow' : self::claimTaskLabel($existingSummary, $task),
         );
-        $projectTaskLiveness = $replayBlockedTask instanceof WorkflowTask
+        $projectTaskLiveness = $forceWorkflowTaskWait
+            || $replayBlockedTask instanceof WorkflowTask
             || $hasChildResolution
             || self::claimOwnsProjectedLiveness($existingSummary)
             || $existingSummary?->liveness_state === 'timer_scheduled';
@@ -559,7 +702,8 @@ final class RunSummaryProjector
         }
 
         if (
-            self::claimProjectsWorkflowTaskWait($task)
+            $forceWorkflowTaskWait
+            || self::claimProjectsWorkflowTaskWait($task)
             || ! $existingSummary instanceof WorkflowRunSummary
             || $existingSummary->wait_kind === null
             || $existingSummary->wait_kind === 'workflow-task'
@@ -575,6 +719,11 @@ final class RunSummaryProjector
                 'resume_source_kind' => 'workflow_task',
                 'resume_source_id' => $task->id,
             ]);
+        }
+
+        if ($forceWorkflowTaskWait) {
+            $values['status'] = $run->status->value;
+            $values['status_bucket'] = $run->status->statusBucket()->value;
         }
 
         if ($exceptionCount['event_ids'] === []) {

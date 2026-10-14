@@ -98,6 +98,53 @@ final class HistoryBudget
     }
 
     /**
+     * Advance complete projected counters by one newly appended event without
+     * scanning the run's existing history. Returns null when the supplied
+     * summary is not the exact predecessor of the event.
+     *
+     * @return array{
+     *     history_event_count: int,
+     *     history_size_bytes: int,
+     *     history_fan_out: int,
+     *     continue_as_new_recommended: bool,
+     *     pressure: string,
+     *     pressure_dimensions: list<string>
+     * }|null
+     */
+    public static function afterAppendedEvent(
+        WorkflowRun $run,
+        WorkflowRunSummary $summary,
+        WorkflowHistoryEvent $event,
+    ): ?array {
+        $previousCount = (int) $summary->history_event_count;
+        $previousSizeBytes = (int) $summary->history_size_bytes;
+        $previousFanOut = (int) $summary->history_fan_out;
+        $eventSequence = (int) $event->sequence;
+        $payload = is_array($event->payload) ? $event->payload : [];
+
+        if (
+            $event->workflow_run_id !== $run->id
+            || (string) $summary->getKey() !== (string) $run->getKey()
+            || $previousCount < 0
+            || $previousSizeBytes < 0
+            || $previousFanOut < 0
+            || ($previousCount === 0 && ($previousSizeBytes !== 0 || $previousFanOut !== 0))
+            || ($previousCount > 0 && $previousSizeBytes === 0)
+            || $eventSequence !== $previousCount + 1
+            || (int) ($run->last_history_sequence ?? 0) !== $eventSequence
+            || ParallelChildGroup::metadataPathFromPayload($payload) !== []
+        ) {
+            return null;
+        }
+
+        return self::fromCounters(
+            $eventSequence,
+            $previousSizeBytes + self::eventSizeBytes($event),
+            $previousFanOut,
+        );
+    }
+
+    /**
      * Build the budget payload from already-aggregated counters (e.g. cached
      * on a projection table) without re-loading history events.
      *

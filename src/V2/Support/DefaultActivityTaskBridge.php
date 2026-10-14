@@ -438,9 +438,29 @@ final class DefaultActivityTaskBridge implements ActivityTaskBridge
                 $payload['progress'] = $progress;
             }
 
-            WorkflowHistoryEvent::record($run, HistoryEventType::ActivityHeartbeatRecorded, $payload, $task);
+            $heartbeatEvent = WorkflowHistoryEvent::record(
+                $run,
+                HistoryEventType::ActivityHeartbeatRecorded,
+                $payload,
+                $task,
+            );
+            $parallelMetadataPath = ActivityProjectionContext::parallelMetadataPath($run, $execution)
+                ?? ParallelChildGroup::metadataPathForSequence($run, (int) $execution->sequence);
 
-            self::projectRun($run, self::PROJECTION_RUN_RELATIONS);
+            if ($parallelMetadataPath === []) {
+                $projectedRun = $run->fresh() ?? $run;
+
+                ActivityProjectionContext::run(
+                    $projectedRun,
+                    $execution,
+                    $task,
+                    $task,
+                    $heartbeatEvent,
+                    static fn () => self::projectRun($projectedRun),
+                );
+            } else {
+                self::projectRun($run, self::PROJECTION_RUN_RELATIONS);
+            }
 
             return self::attemptStatus($attemptId, $attempt, $execution, $run, $task, true, false, null, true);
         });

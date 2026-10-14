@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
+use ReflectionMethod;
 use RuntimeException;
 use Symfony\Component\Process\Process;
 use Symfony\Component\Uid\Ulid;
@@ -6453,6 +6454,17 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         /** @var WorkflowTask $task */
         $task = $this->createLeasedTask($run);
 
+        for ($sequence = 1; $sequence <= 40; $sequence++) {
+            WorkflowHistoryEvent::record($run, HistoryEventType::SideEffectRecorded, [
+                'sequence' => $sequence,
+                'result' => "historical-value-{$sequence}",
+            ]);
+        }
+
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
         $result = $this->bridge->complete($task->id, [
             [
                 'type' => 'schedule_activity',
@@ -6461,6 +6473,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
                 'queue' => 'activities',
             ],
         ]);
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
 
         $this->assertTrue($result['completed']);
         $this->assertSame($run->id, $result['workflow_run_id']);
@@ -6500,6 +6514,33 @@ final class V2WorkflowTaskBridgeTest extends TestCase
 
         $this->assertNotNull($scheduledEvent);
         $this->assertSame($execution->id, $scheduledEvent->payload['activity_execution_id']);
+        $broadHistoryQueries = collect($queries)
+            ->filter(static function (array $query): bool {
+                $sql = strtolower($query['query']);
+
+                return str_starts_with(ltrim($sql), 'select')
+                    && str_contains($sql, 'workflow_history_events')
+                    && ! str_contains($sql, 'select max(')
+                    && ! str_contains($sql, 'limit 1');
+            });
+        $this->assertCount(2, $broadHistoryQueries);
+        $this->assertFalse(collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_contains($sql, 'workflow_history_events')
+                && (str_contains($sql, 'sum(') || str_contains($sql, 'row_number('));
+        }));
+        $this->assertFalse(collect($queries)->contains(static function (array $query): bool {
+            $sql = strtolower($query['query']);
+
+            return str_starts_with(ltrim($sql), 'select')
+                && str_contains($sql, 'workflow_run_timeline_entries')
+                && str_contains($sql, 'workflow_run_id');
+        }));
+
+        $boundedProjection = $this->projectionStateForRun($run);
+        (new DefaultHistoryProjectionRole())->projectRun($run->fresh() ?? $run);
+        $this->assertSame($boundedProjection, $this->projectionStateForRun($run));
     }
 
     public function testCompleteAtomicallyRecordsLocalActivityAttemptsWithoutAnActivityTask(): void
@@ -10977,6 +11018,55 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         ]);
     }
 
+    public function testSingleActivityProjectionFastPathRejectsParallelMetadata(): void
+    {
+        $run = $this->createWaitingRun();
+        $sourceTask = $this->createLeasedTask($run);
+        $result = $this->bridge->complete($sourceTask->id, [[
+            'type' => 'schedule_activity',
+            'activity_type' => 'guarded-parallel-activity',
+        ]]);
+
+        $this->assertTrue($result['completed']);
+
+        $activityTask = WorkflowTask::query()->findOrFail($result['created_task_ids'][0]);
+        $scheduledEvent = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::ActivityScheduled->value)
+            ->sole();
+        $parallelEntry = [
+            'parallel_group_id' => 'parallel-activities:1:1',
+            'parallel_group_kind' => 'activity',
+            'parallel_group_base_sequence' => 1,
+            'parallel_group_size' => 1,
+            'parallel_group_index' => 0,
+        ];
+        $scheduledEvent->forceFill([
+            'payload' => [
+                ...$scheduledEvent->payload,
+                ...$parallelEntry,
+                'parallel_group_path' => [$parallelEntry],
+            ],
+        ])->save();
+        $run->refresh();
+        $sourceTask->refresh();
+
+        $projectSingleScheduledActivity = new ReflectionMethod(
+            DefaultWorkflowTaskBridge::class,
+            'projectSingleScheduledActivity',
+        );
+
+        $this->assertFalse($projectSingleScheduledActivity->invoke(
+            null,
+            $run,
+            $sourceTask,
+            [[
+                'type' => 'schedule_activity',
+            ]],
+            [$activityTask->id],
+        ));
+    }
+
     public function testCompleteRetainsFailClosedParallelMetadataValidation(): void
     {
         $entry = static fn (int $base, int $size, int $index, string $kind = 'activity'): array => [
@@ -12170,6 +12260,50 @@ SQL);
         }
 
         return $value;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function projectionStateForRun(WorkflowRun $run): array
+    {
+        $summary = WorkflowRunSummary::query()->findOrFail($run->id)->attributesToArray();
+        unset($summary['created_at'], $summary['updated_at']);
+
+        return self::canonicalizeProjectionValue([
+            'summary' => $summary,
+            'waits' => WorkflowRunWait::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('position')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowRunWait $wait): array => $wait->toWaitPayload())
+                ->all(),
+            'timeline' => WorkflowTimelineEntry::query()
+                ->where('workflow_run_id', $run->id)
+                ->orderBy('sequence')
+                ->orderBy('id')
+                ->get()
+                ->map(static fn (WorkflowTimelineEntry $entry): array => $entry->toTimelinePayload())
+                ->all(),
+        ]);
+    }
+
+    private static function canonicalizeProjectionValue(mixed $value): mixed
+    {
+        if ($value instanceof \Carbon\CarbonInterface) {
+            return $value->toJSON();
+        }
+
+        if (! is_array($value)) {
+            return $value;
+        }
+
+        if (! array_is_list($value)) {
+            ksort($value);
+        }
+
+        return array_map(self::canonicalizeProjectionValue(...), $value);
     }
 
     private function createLeasedTask(WorkflowRun $run): WorkflowTask

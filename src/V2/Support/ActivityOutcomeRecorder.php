@@ -241,7 +241,8 @@ final class ActivityOutcomeRecorder
                 return self::recorded(null);
             }
 
-            $parallelMetadataPath = ParallelChildGroup::metadataPathForSequence($run, (int) $lockedExecution->sequence);
+            $parallelMetadataPath = ActivityProjectionContext::parallelMetadataPath($run, $lockedExecution)
+                ?? ParallelChildGroup::metadataPathForSequence($run, (int) $lockedExecution->sequence);
             $parallelMetadata = ParallelChildGroup::payloadForPath($parallelMetadataPath);
             $resolutionEvent = null;
 
@@ -321,7 +322,7 @@ final class ActivityOutcomeRecorder
                     'attempt_count' => $attemptCount,
                 ]);
 
-                WorkflowHistoryEvent::record($run, HistoryEventType::ActivityRetryScheduled, array_merge([
+                $retryEvent = WorkflowHistoryEvent::record($run, HistoryEventType::ActivityRetryScheduled, array_merge([
                     'activity_execution_id' => $lockedExecution->id,
                     'activity_attempt_id' => $attemptId,
                     'activity_class' => $lockedExecution->activity_class,
@@ -343,7 +344,11 @@ final class ActivityOutcomeRecorder
                     'activity' => self::publicActivitySnapshot($throwable, $lockedExecution, $historyExceptionPayload),
                 ], $parallelMetadata ?? []), $task);
 
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                if ($parallelMetadataPath === []) {
+                    self::projectActivityTransition($run, $lockedExecution, $task, $retryTask, $retryEvent);
+                } else {
+                    self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                }
 
                 return self::recorded($retryTask);
             } else {
@@ -464,7 +469,11 @@ final class ActivityOutcomeRecorder
                 'compatibility' => $run->compatibility,
             ]);
 
-            self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+            if ($parallelMetadataPath === [] && $resolutionEvent instanceof WorkflowHistoryEvent) {
+                self::projectActivityTransition($run, $lockedExecution, $task, $resumeTask, $resolutionEvent);
+            } else {
+                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+            }
 
             return self::recorded($resumeTask);
         }, 3);
@@ -779,6 +788,25 @@ final class ActivityOutcomeRecorder
     private static function projectRun(WorkflowRun $run): void
     {
         self::historyProjectionRole()->projectRun($run);
+    }
+
+    private static function projectActivityTransition(
+        WorkflowRun $run,
+        ActivityExecution $execution,
+        WorkflowTask $sourceTask,
+        WorkflowTask $nextTask,
+        WorkflowHistoryEvent $event,
+    ): void {
+        $projectedRun = $run->fresh() ?? $run;
+
+        ActivityProjectionContext::run(
+            $projectedRun,
+            $execution,
+            $sourceTask,
+            $nextTask,
+            $event,
+            static fn () => self::historyProjectionRole()->projectRun($projectedRun),
+        );
     }
 
     private static function historyProjectionRole(): HistoryProjectionRole

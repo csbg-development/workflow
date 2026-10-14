@@ -109,6 +109,8 @@ final class V2StandaloneActivityHostTest extends TestCase
         $this->assertSame(ActivityStatus::Pending, $execution->status);
         $this->assertSame($run->id, $execution->workflow_run_id);
         $this->assertSame($arguments, $execution->arguments);
+        $this->assertSame([], $execution->parallel_group_path);
+        $this->assertNotNull($execution->getRawOriginal('parallel_group_path'));
 
         $task = WorkflowTask::query()
             ->where('workflow_run_id', $run->id)
