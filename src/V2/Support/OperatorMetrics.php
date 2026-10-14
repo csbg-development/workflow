@@ -670,7 +670,7 @@ final class OperatorMetrics
         $missingCurrentOpenWaits = self::missingCurrentOpenWaitProjections($namespace);
         $evaluated = self::selectedRunProjectionDriftEnabled();
         $drift = $evaluated ? SelectedRunProjectionDrift::waitMetrics(namespace: $namespace) : null;
-        $orphaned = self::projectionRowsMissingRun($waitModel, $namespace);
+        $orphaned = $evaluated ? self::projectionRowsMissingRun($waitModel, $namespace) : null;
 
         return [
             'evaluated' => $evaluated,
@@ -704,10 +704,10 @@ final class OperatorMetrics
     private static function runTimelineProjectionMetrics(?string $namespace): array
     {
         $timelineModel = self::runTimelineEntryModel();
-        $missingHistoryEvents = self::missingTimelineEventProjections($namespace);
         $evaluated = self::selectedRunProjectionDriftEnabled();
         $drift = $evaluated ? SelectedRunProjectionDrift::timelineMetrics(namespace: $namespace) : null;
-        $orphaned = self::orphanedTimelineRows($namespace);
+        $missingHistoryEvents = $evaluated ? self::missingTimelineEventProjections($namespace) : null;
+        $orphaned = $evaluated ? self::orphanedTimelineRows($namespace) : null;
 
         return [
             'evaluated' => $evaluated,
@@ -744,7 +744,15 @@ final class OperatorMetrics
         $timerModel = self::runTimerEntryModel();
         $evaluated = self::selectedRunProjectionDriftEnabled();
         $drift = $evaluated ? SelectedRunProjectionDrift::timerMetrics(namespace: $namespace) : null;
-        $orphaned = self::projectionRowsMissingRun($timerModel, $namespace);
+        $orphaned = $evaluated ? self::projectionRowsMissingRun($timerModel, $namespace) : null;
+        $schemaVersionMismatchRows = $evaluated
+            ? self::scopedRunModelQuery($timerModel, $namespace)
+                ->where(static function ($query): void {
+                    $query->whereNull('schema_version')
+                        ->orWhere('schema_version', '!=', WorkflowRunTimerEntry::CURRENT_SCHEMA_VERSION);
+                })
+                ->count()
+            : null;
 
         return [
             'evaluated' => $evaluated,
@@ -759,12 +767,7 @@ final class OperatorMetrics
             'missing_runs_with_timers' => $drift['missing_runs_with_timers'] ?? null,
             'stale_projected_runs' => $drift['stale_projected_runs'] ?? null,
             'schema_version_mismatch_runs' => $drift['schema_version_mismatch_runs'] ?? null,
-            'schema_version_mismatch_rows' => self::scopedRunModelQuery($timerModel, $namespace)
-                ->where(static function ($query): void {
-                    $query->whereNull('schema_version')
-                        ->orWhere('schema_version', '!=', WorkflowRunTimerEntry::CURRENT_SCHEMA_VERSION);
-                })
-                ->count(),
+            'schema_version_mismatch_rows' => $schemaVersionMismatchRows,
             'orphaned' => $orphaned,
             'needs_rebuild' => $drift === null
                 ? null
@@ -786,7 +789,7 @@ final class OperatorMetrics
         $lineageModel = self::runLineageEntryModel();
         $evaluated = self::selectedRunProjectionDriftEnabled();
         $drift = $evaluated ? SelectedRunProjectionDrift::lineageMetrics(namespace: $namespace) : null;
-        $orphaned = self::projectionRowsMissingRun($lineageModel, $namespace);
+        $orphaned = $evaluated ? self::projectionRowsMissingRun($lineageModel, $namespace) : null;
 
         return [
             'evaluated' => $evaluated,
