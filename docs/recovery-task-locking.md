@@ -26,6 +26,16 @@ budget or production prediction. A run/type/status candidate was faster but
 reproduced a same-run 1213 deadlock and is intentionally excluded. History growth
 and existing eager loading remain separate performance concerns.
 
+Workflow and timer execution, and non-activity existing-task repair, also lock
+run before task. Execution uses the task snapshot returned by its separate claim transaction;
+existing-task repair first reads a locator snapshot. They lock the run, then
+re-read and lock the task with a matching run-ID predicate. Execution also
+checks leased status, lease owner and claimed attempt number after waiting. A
+repaired lease or newer attempt makes the stale worker stop. This preserves
+current task state and fails closed on changed lineage. The claim-only phases
+lock a task without subsequently locking the run; activity recovery retains its
+established attempt/execution/run/task order.
+
 `TaskWatchdog::recoverMissingTask()` permits three transaction attempts. Repair
 runs again from persisted state after rollback. Task dispatch remains outside
 the retry closure; nested callers still defer dispatch through `DB::afterCommit`.
@@ -41,8 +51,9 @@ the repository's default test environment otherwise specifies PostgreSQL's port.
 The tests reset their isolated database. Never point them at application data.
 
 The tests exercise unrelated and same-run concurrent PRIMARY updates with a
-large completed-task history, two concurrent repairs, rollback/retry idempotency,
-three-attempt exhaustion, outer rollback with no dispatch, successful dispatch
+large completed-task history, actual workflow/timer/existing-repair workers
+contending with recovery, two concurrent repairs, rollback/retry idempotency,
+three-attempt exhaustion, old and newer replacement leases, outer rollback with no dispatch, successful dispatch
 only after outer commit, and preservation of old waiting runs. Same-run contention
 uses an observed InnoDB lock wait as its barrier. The retry fault is injected
 after a real task INSERT so rollback and discarded dispatch callbacks are tested.

@@ -230,10 +230,13 @@ final class TaskWatchdog
                 if ($snapshot?->task_type === TaskType::Activity) {
                     [$task, $run] = self::lockActivityRecoveryRows($snapshot);
                 } else {
-                    $task = WorkflowTask::query()->lockForUpdate()->find($candidateId);
-                    $run = $task === null ? null : WorkflowRun::query()
+                    $run = $snapshot === null ? null : WorkflowRun::query()
                         ->lockForUpdate()
-                        ->find($task->workflow_run_id);
+                        ->find($snapshot->workflow_run_id);
+                    $task = $run === null ? null : WorkflowTask::query()
+                        ->where('workflow_run_id', $run->id)
+                        ->lockForUpdate()
+                        ->find($candidateId);
 
                     // A changed routing snapshot must be reconsidered on the next pass.
                     if ($task?->task_type === TaskType::Activity) {

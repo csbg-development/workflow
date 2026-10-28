@@ -120,7 +120,8 @@ final class V2RecoveryTaskLockMySqlTest extends TestCase
             ->call([(new \Workflow\V2\Jobs\RunWorkflowTask($task->id)), 'handle']);
         $this->assertSame(RunStatus::Waiting, $run->fresh()->status);
         $run->forceFill([
-            'last_progress_at' => now()->subYear(),
+            'last_progress_at' => now()
+                ->subYear(),
         ])->save();
         Queue::fake();
         $this->repair($run->id);
@@ -192,6 +193,41 @@ final class V2RecoveryTaskLockMySqlTest extends TestCase
         Queue::assertNothingPushed();
     }
 
+    public function testWorkflowExecutionAndRecoveryLockRunBeforeTask(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('workflow');
+    }
+
+    public function testTimerExecutionAndRecoveryLockRunBeforeTask(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('timer');
+    }
+
+    public function testExistingTaskRepairAndRecoveryLockRunBeforeTask(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('repair');
+    }
+
+    public function testWorkflowWorkerDoesNotExecuteARepairedLease(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('workflow', reclaim: true);
+    }
+
+    public function testTimerWorkerDoesNotExecuteARepairedLease(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('timer', reclaim: true);
+    }
+
+    public function testWorkflowWorkerDoesNotExecuteANewerAttempt(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('workflow', reclaim: true, newerAttempt: true);
+    }
+
+    public function testTimerWorkerDoesNotExecuteANewerAttempt(): void
+    {
+        $this->assertWorkerAndRecoveryComplete('timer', reclaim: true, newerAttempt: true);
+    }
+
     protected function getPackageProviders($app): array
     {
         return [WorkflowServiceProvider::class];
@@ -208,6 +244,124 @@ final class V2RecoveryTaskLockMySqlTest extends TestCase
     {
         $this->artisan('migrate:fresh')
             ->run();
+    }
+
+    private function assertWorkerAndRecoveryComplete(
+        string $actor,
+        bool $reclaim = false,
+        bool $newerAttempt = false
+    ): void {
+        if ($actor === 'timer') {
+            $stub = WorkflowStub::make(\Tests\Fixtures\V2\TestTimerWorkflow::class);
+            $stub->start(5);
+            $run = WorkflowRun::query()->findOrFail($stub->runId());
+            $initial = $run->tasks()
+                ->where('status', 'ready')
+                ->firstOrFail();
+            app()
+                ->call([new \Workflow\V2\Jobs\RunWorkflowTask($initial->id), 'handle']);
+            $task = $run->tasks()
+                ->where('task_type', 'timer')
+                ->firstOrFail();
+            \Illuminate\Support\Carbon::setTestNow(now()->addSeconds(6));
+        } else {
+            $run = $this->newRun();
+            $task = $run->tasks()
+                ->firstOrFail();
+            $task->forceFill([
+                'last_dispatched_at' => now()
+                    ->subYear(),
+                'created_at' => now()
+                    ->subYear(),
+            ])->save();
+        }
+        DB::disconnect();
+        $sockets = stream_socket_pair(STREAM_PF_UNIX, STREAM_SOCK_STREAM, STREAM_IPPROTO_IP);
+        $pid = pcntl_fork();
+        if ($pid === 0) {
+            fclose($sockets[0]);
+            DB::reconnect();
+            fwrite($sockets[1], DB::selectOne('SELECT CONNECTION_ID() AS id')->id . "\n");
+            fgets($sockets[1]);
+            try {
+                if ($actor === 'repair') {
+                    $result = (new ReflectionMethod(TaskWatchdog::class, 'recoverExistingTask'))->invoke(
+                        null,
+                        $task->id
+                    );
+                    if ($result['error'] !== null) {
+                        throw new \RuntimeException($result['error']);
+                    }
+                } else {
+                    $job = $actor === 'timer'
+                        ? new \Workflow\V2\Jobs\RunTimerTask($task->id)
+                        : new \Workflow\V2\Jobs\RunWorkflowTask($task->id);
+                    app()
+                        ->call([$job, 'handle']);
+                }
+                fwrite($sockets[1], "ok\n");
+            } catch (\Throwable $error) {
+                fwrite($sockets[1], 'error:' . $error->getMessage() . "\n");
+            }
+            fclose($sockets[1]);
+            exit(0);
+        }
+        fclose($sockets[1]);
+        stream_set_timeout($sockets[0], 15);
+        $childConnection = (int) trim(fgets($sockets[0]));
+        DB::reconnect();
+        DB::statement('SET SESSION innodb_lock_wait_timeout = 8');
+        DB::beginTransaction();
+        try {
+            $locked = WorkflowRun::query()->lockForUpdate()->findOrFail($run->id);
+            fwrite($sockets[0], "go\n");
+            $deadline = microtime(true) + 5;
+            do {
+                $waiting = DB::selectOne(
+                    'SELECT COUNT(*) AS n FROM performance_schema.data_lock_waits w '
+                    . 'JOIN performance_schema.threads t ON t.THREAD_ID=w.REQUESTING_THREAD_ID '
+                    . 'WHERE t.PROCESSLIST_ID=?',
+                    [$childConnection],
+                );
+                if ((int) $waiting->n > 0) {
+                    break;
+                }
+                usleep(10000);
+            } while (microtime(true) < $deadline);
+            $this->assertGreaterThan(0, (int) $waiting->n, 'Worker must reach the observed run-lock barrier.');
+            if ($reclaim) {
+                $expired = $run->tasks()
+                    ->whereKey($task->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $expired->forceFill([
+                    'lease_expires_at' => now()->subSecond(),
+                ])->save();
+                \Workflow\V2\Support\TaskRepair::recoverExistingTask($expired, $locked);
+                if ($newerAttempt) {
+                    $expired->forceFill([
+                        'status' => TaskStatus::Leased,
+                        'lease_owner' => $task->id,
+                        'attempt_count' => $expired->attempt_count + 1,
+                    ])->save();
+                }
+            }
+            app(WorkflowExecutor::class)->recoverClosedChildResolutions($locked);
+            DB::commit();
+        } finally {
+            if (DB::transactionLevel() > 0) {
+                DB::rollBack();
+            }
+            $result = fgets($sockets[0]);
+            fclose($sockets[0]);
+            pcntl_waitpid($pid, $status);
+            \Illuminate\Support\Carbon::setTestNow();
+        }
+        $this->assertSame("ok\n", $result);
+        $this->assertSame(0, $run->tasks()->where('status', 'failed')->count());
+        if ($reclaim) {
+            $this->assertSame($newerAttempt ? TaskStatus::Leased : TaskStatus::Ready, $task->fresh()->status);
+        }
     }
 
     private function seedHistory(WorkflowRun $run): void

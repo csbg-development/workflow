@@ -79,7 +79,7 @@ final class RunTimerTask implements ShouldQueue
             is_string($this->queue ?? null) ? $this->queue : null,
         );
 
-        [$timerId, $releaseIn] = $this->claimTask();
+        [$claimedTask, $releaseIn] = $this->claimTask();
 
         if ($releaseIn !== null) {
             // Relay capped/early wakeups without spending the queue job's failure budget.
@@ -92,20 +92,28 @@ final class RunTimerTask implements ShouldQueue
             return;
         }
 
-        if ($timerId === null) {
+        if (! $claimedTask instanceof WorkflowTask) {
             return;
         }
 
-        $resumeTask = DB::transaction(function () use ($timerId): ?WorkflowTask {
-            /** @var WorkflowTask $task */
-            $task = WorkflowTask::query()
-                ->lockForUpdate()
-                ->findOrFail($this->taskId);
+        $timerId = $claimedTask->payload['timer_id'];
 
+        $resumeTask = DB::transaction(function () use ($timerId, $claimedTask): ?WorkflowTask {
             /** @var WorkflowRun $run */
             $run = WorkflowRun::query()
                 ->lockForUpdate()
-                ->findOrFail($task->workflow_run_id);
+                ->findOrFail($claimedTask->workflow_run_id);
+            /** @var WorkflowTask $task */
+            $task = WorkflowTask::query()
+                ->where('workflow_run_id', $run->id)
+                ->lockForUpdate()
+                ->findOrFail($this->taskId);
+            // A repair may replace the lease while execution waits for the run.
+            if ($task->status !== TaskStatus::Leased
+                || $task->lease_owner !== $this->taskId
+                || (int) $task->attempt_count !== (int) $claimedTask->attempt_count) {
+                return null;
+            }
             $timer = TimerRecovery::restore($run, $timerId);
 
             if (! $timer instanceof WorkflowTimer) {
@@ -245,7 +253,7 @@ final class RunTimerTask implements ShouldQueue
     }
 
     /**
-     * @return array{0: ?string, 1: ?int}
+     * @return array{0: ?WorkflowTask, 1: ?int}
      */
     private function claimTask(): array
     {
@@ -315,7 +323,7 @@ final class RunTimerTask implements ShouldQueue
 
             $this->projectRun($run, self::PROJECTION_RUN_RELATIONS);
 
-            return [$timerId, null];
+            return [$task, null];
         });
     }
 

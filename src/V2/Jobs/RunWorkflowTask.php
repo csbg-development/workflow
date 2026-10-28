@@ -47,23 +47,33 @@ final class RunWorkflowTask implements ShouldQueue
             is_string($this->queue ?? null) ? $this->queue : null,
         );
 
-        if (! $this->claimTask()) {
+        $claimedTask = $this->claimTask();
+
+        if (! $claimedTask instanceof WorkflowTask) {
             return;
         }
 
         $nextTask = null;
 
         try {
-            $nextTask = DB::transaction(function () use ($executor): ?WorkflowTask {
-                /** @var WorkflowTask $task */
-                $task = ConfiguredV2Models::query('task_model', WorkflowTask::class)
-                    ->lockForUpdate()
-                    ->findOrFail($this->taskId);
-
+            $nextTask = DB::transaction(function () use ($executor, $claimedTask): ?WorkflowTask {
                 /** @var WorkflowRun $run */
                 $run = ConfiguredV2Models::query('run_model', WorkflowRun::class)
                     ->lockForUpdate()
-                    ->findOrFail($task->workflow_run_id);
+                    ->findOrFail($claimedTask->workflow_run_id);
+
+                /** @var WorkflowTask $task */
+                $task = ConfiguredV2Models::query('task_model', WorkflowTask::class)
+                    ->where('workflow_run_id', $run->id)
+                    ->lockForUpdate()
+                    ->findOrFail($this->taskId);
+
+                // A repair may replace the lease while execution waits for the run.
+                if ($task->status !== TaskStatus::Leased
+                    || $task->lease_owner !== $this->taskId
+                    || (int) $task->attempt_count !== (int) $claimedTask->attempt_count) {
+                    return null;
+                }
 
                 if (in_array($run->status->value, ['completed', 'failed', 'cancelled', 'terminated'], true)) {
                     $task->forceFill([
@@ -112,16 +122,16 @@ final class RunWorkflowTask implements ShouldQueue
         }
     }
 
-    private function claimTask(): bool
+    private function claimTask(): ?WorkflowTask
     {
-        return DB::transaction(function (): bool {
+        return DB::transaction(function (): ?WorkflowTask {
             /** @var WorkflowTask|null $task */
             $task = ConfiguredV2Models::query('task_model', WorkflowTask::class)
                 ->lockForUpdate()
                 ->find($this->taskId);
 
             if ($task === null || $task->task_type !== TaskType::Workflow || $task->status !== TaskStatus::Ready) {
-                return false;
+                return null;
             }
 
             /** @var WorkflowRun $run */
@@ -132,13 +142,13 @@ final class RunWorkflowTask implements ShouldQueue
             if (TaskBackendCapabilities::recordClaimFailureIfUnsupported($task) !== null) {
                 $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
 
-                return false;
+                return null;
             }
 
             if (! TaskCompatibility::supported($task, $run)) {
                 $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
 
-                return false;
+                return null;
             }
 
             $task->forceFill([
@@ -155,7 +165,7 @@ final class RunWorkflowTask implements ShouldQueue
 
             $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
 
-            return true;
+            return $task;
         });
     }
 
