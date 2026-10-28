@@ -2012,15 +2012,22 @@ final class WorkflowExecutor
      */
     public function recoverClosedChildResolutions(WorkflowRun $parentRun): void
     {
-        if ($parentRun->status->isTerminal() || $parentRun->tasks()
-            // Status updates acquire PRIMARY before changing status index entries.
-            // Use the stable run index instead of locking mutable status entries first.
-            ->forceIndex('workflow_tasks_workflow_run_id_index')
+        if ($parentRun->status->isTerminal()) {
+            return;
+        }
+
+        $pendingTasks = $parentRun->tasks()
             ->reorder()
             ->where('task_type', TaskType::Workflow->value)
-            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value])
-            ->lockForUpdate()
-            ->exists()) {
+            ->whereIn('status', [TaskStatus::Ready->value, TaskStatus::Leased->value]);
+
+        if ($pendingTasks->getRelated()->getConnection()->getDriverName() === 'mysql') {
+            // Status updates acquire PRIMARY before changing status index entries.
+            // Use the stable run index instead of locking mutable status entries first.
+            $pendingTasks->forceIndex('workflow_tasks_workflow_run_id_index');
+        }
+
+        if ($pendingTasks->lockForUpdate()->exists()) {
             return;
         }
 

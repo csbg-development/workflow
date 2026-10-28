@@ -14,8 +14,8 @@ the scan highly selective. The parent run remains locked before task recovery.
 
 InnoDB can still take range/gap locks; this is not a claim of lock-free execution.
 
-No schema migration is required. Other database grammars ignore the MySQL index
-hint. Custom MySQL schemas must retain the canonical run-ID index name. Do not
+No schema migration is required. The hint is applied only to MySQL. SQLite and PostgreSQL grammar checks
+verify the guard compiles without it. Custom MySQL schemas must retain the canonical run-ID index name. Do not
 silently fall back to the shared status index when it is missing.
 
 This is a locking correction, not a history-scan optimization. The check still
