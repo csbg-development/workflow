@@ -408,7 +408,7 @@ final class TaskWatchdog
                 );
 
                 return $task;
-            });
+            }, attempts: 3);
 
             if ($task instanceof WorkflowTask) {
                 TaskDispatcher::dispatch($task);
