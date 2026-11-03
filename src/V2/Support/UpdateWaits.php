@@ -12,12 +12,26 @@ use Workflow\V2\Models\WorkflowTask;
 
 final class UpdateWaits
 {
+    private const LEGACY_SCOPE_KEYS = [
+        'workflow_wait_kind',
+        'open_wait_id',
+        'resume_source_kind',
+        'resume_source_id',
+        'workflow_update_id',
+        'workflow_signal_id',
+        'workflow_command_id',
+        'child_call_id',
+        'child_workflow_run_id',
+        'condition_wait_id',
+        'timer_id',
+    ];
+
     /**
      * @return list<array<string, mixed>>
      */
     public static function forRun(WorkflowRun $run): array
     {
-        $run->loadMissing(['commands', 'historyEvents', 'updates.command', 'updates.failure', 'tasks']);
+        $run->loadMissing(['commands', 'historyEvents', 'updates.command', 'updates.failure']);
 
         $rows = [];
 
@@ -101,36 +115,55 @@ final class UpdateWaits
         ?string $commandId,
         string $waitId,
     ): ?WorkflowTask {
-        $workflowTasks = $run->tasks
-            ->filter(static fn (WorkflowTask $task): bool => $task->task_type === TaskType::Workflow)
-            ->values();
-
-        $matchedTasks = $workflowTasks
-            ->filter(
-                static fn (WorkflowTask $task): bool => self::taskMatchesUpdateWait(
-                    $task,
+        if ($run->relationLoaded('tasks')) {
+            $candidates = $run->tasks;
+        } else {
+            $candidates = RuntimeTaskQuery::forRun($run)
+                ->where('task_type', TaskType::Workflow->value)
+                ->where(static function (\Illuminate\Database\Eloquent\Builder $query) use (
                     $updateId,
                     $commandId,
-                    $waitId,
-                )
-            )
-            ->values();
-
-        if ($matchedTasks->isNotEmpty()) {
-            /** @var WorkflowTask|null $task */
-            $task = self::sortTasks($matchedTasks)->first();
-
-            return $task;
+                    $waitId
+                ): void {
+                    $query->where('payload->open_wait_id', $waitId);
+                    if ($updateId !== null) {
+                        $query->orWhere('payload->workflow_update_id', $updateId)
+                            ->orWhere(static function (\Illuminate\Database\Eloquent\Builder $query) use (
+                                $updateId
+                            ): void {
+                                $query->where('payload->resume_source_kind', 'workflow_update')
+                                    ->where('payload->resume_source_id', $updateId);
+                            });
+                    }
+                    if ($commandId !== null) {
+                        $query->orWhere('payload->workflow_command_id', $commandId);
+                    }
+                    $query->orWhere(static function (\Illuminate\Database\Eloquent\Builder $query): void {
+                        foreach (self::LEGACY_SCOPE_KEYS as $key) {
+                            $query->whereNull('payload->' . $key);
+                        }
+                    });
+                })->orderBy('available_at')
+                ->lazy(128);
         }
 
-        /** @var WorkflowTask|null $task */
-        $task = self::sortTasks(
-            $workflowTasks
-                ->filter(static fn (WorkflowTask $task): bool => self::taskIsLegacyUnscopedWorkflowResume($task))
-                ->values()
-        )->first();
+        $matched = null;
+        $legacy = null;
+        foreach ($candidates as $task) {
+            if ($task->task_type !== TaskType::Workflow) {
+                continue;
+            }
+            if (self::taskMatchesUpdateWait($task, $updateId, $commandId, $waitId)
+                && ($matched === null || self::compareTasks($task, $matched) < 0)) {
+                $matched = $task;
+            }
+            if (self::taskIsLegacyUnscopedWorkflowResume($task)
+                && ($legacy === null || self::compareTasks($task, $legacy) < 0)) {
+                $legacy = $task;
+            }
+        }
 
-        return $task;
+        return $matched ?? $legacy;
     }
 
     private static function taskMatchesUpdateWait(
@@ -158,19 +191,7 @@ final class UpdateWaits
     {
         $payload = is_array($task->payload) ? $task->payload : [];
 
-        foreach ([
-            'workflow_wait_kind',
-            'open_wait_id',
-            'resume_source_kind',
-            'resume_source_id',
-            'workflow_update_id',
-            'workflow_signal_id',
-            'workflow_command_id',
-            'child_call_id',
-            'child_workflow_run_id',
-            'condition_wait_id',
-            'timer_id',
-        ] as $key) {
+        foreach (self::LEGACY_SCOPE_KEYS as $key) {
             if (array_key_exists($key, $payload)) {
                 return false;
             }
@@ -179,32 +200,30 @@ final class UpdateWaits
         return true;
     }
 
-    private static function sortTasks(\Illuminate\Support\Collection $tasks): \Illuminate\Support\Collection
+    private static function compareTasks(WorkflowTask $left, WorkflowTask $right): int
     {
-        return $tasks->sort(static function (WorkflowTask $left, WorkflowTask $right): int {
-            $leftPriority = self::taskPriority($left);
-            $rightPriority = self::taskPriority($right);
+        $leftPriority = self::taskPriority($left);
+        $rightPriority = self::taskPriority($right);
 
-            if ($leftPriority !== $rightPriority) {
-                return $leftPriority <=> $rightPriority;
-            }
+        if ($leftPriority !== $rightPriority) {
+            return $leftPriority <=> $rightPriority;
+        }
 
-            $leftUpdatedAt = $left->updated_at?->getTimestampMs() ?? PHP_INT_MIN;
-            $rightUpdatedAt = $right->updated_at?->getTimestampMs() ?? PHP_INT_MIN;
+        $leftUpdatedAt = $left->updated_at?->getTimestampMs() ?? PHP_INT_MIN;
+        $rightUpdatedAt = $right->updated_at?->getTimestampMs() ?? PHP_INT_MIN;
 
-            if ($leftUpdatedAt !== $rightUpdatedAt) {
-                return $rightUpdatedAt <=> $leftUpdatedAt;
-            }
+        if ($leftUpdatedAt !== $rightUpdatedAt) {
+            return $rightUpdatedAt <=> $leftUpdatedAt;
+        }
 
-            $leftCreatedAt = $left->created_at?->getTimestampMs() ?? PHP_INT_MIN;
-            $rightCreatedAt = $right->created_at?->getTimestampMs() ?? PHP_INT_MIN;
+        $leftCreatedAt = $left->created_at?->getTimestampMs() ?? PHP_INT_MIN;
+        $rightCreatedAt = $right->created_at?->getTimestampMs() ?? PHP_INT_MIN;
 
-            if ($leftCreatedAt !== $rightCreatedAt) {
-                return $rightCreatedAt <=> $leftCreatedAt;
-            }
+        if ($leftCreatedAt !== $rightCreatedAt) {
+            return $rightCreatedAt <=> $leftCreatedAt;
+        }
 
-            return $right->id <=> $left->id;
-        });
+        return $right->id <=> $left->id;
     }
 
     private static function taskPriority(WorkflowTask $task): int

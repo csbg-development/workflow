@@ -61,6 +61,7 @@ use Workflow\V2\Support\PendingUpdateCloser;
 use Workflow\V2\Support\QueryStateReplayer;
 use Workflow\V2\Support\RoutingResolver;
 use Workflow\V2\Support\RunCommandContract;
+use Workflow\V2\Support\RuntimeTaskQuery;
 use Workflow\V2\Support\SearchAttributeUpsertService;
 use Workflow\V2\Support\SelectedRunLocator;
 use Workflow\V2\Support\SignalWaits;
@@ -107,7 +108,6 @@ final class WorkflowStub
      */
     private const PROJECTION_RUN_RELATIONS = [
         'instance',
-        'tasks',
         'activityExecutions',
         'timers',
         'failures',
@@ -123,7 +123,6 @@ final class WorkflowStub
      */
     private const PROJECTION_RUN_RELATIONS_WITH_CHILDREN = [
         'instance',
-        'tasks',
         'activityExecutions',
         'timers',
         'failures',
@@ -1148,7 +1147,7 @@ final class WorkflowStub
                 'compatibility' => $run->compatibility,
             ]);
 
-            self::projectRun($run, ['instance', 'tasks', 'activityExecutions', 'failures', 'historyEvents']);
+            self::projectRun($run, ['instance', 'activityExecutions', 'failures', 'historyEvents']);
 
             $startedRun = $run;
         }, self::storageTransactionAttempts());
@@ -1549,14 +1548,8 @@ final class WorkflowStub
             }
 
             $run->setRelation('instance', $instance);
-            $run->setRelation(
-                'tasks',
-                self::taskQuery()
-                    ->where('workflow_run_id', $run->id)
-                    ->orderBy('available_at')
-                    ->lockForUpdate()
-                    ->get()
-            );
+            $run->unsetRelation('tasks');
+            RuntimeTaskQuery::lockCandidates($run);
             $run->setRelation(
                 'activityExecutions',
                 ActivityExecution::query()
@@ -4359,14 +4352,8 @@ final class WorkflowStub
     private function loadLockedRunRelations(WorkflowRun $run, WorkflowInstance $instance): void
     {
         $run->setRelation('instance', $instance);
-        $run->setRelation(
-            'tasks',
-            self::taskQuery()
-                ->where('workflow_run_id', $run->id)
-                ->orderBy('available_at')
-                ->lockForUpdate()
-                ->get()
-        );
+        $run->unsetRelation('tasks');
+        RuntimeTaskQuery::lockCandidates($run);
         $run->setRelation(
             'activityExecutions',
             ActivityExecution::query()

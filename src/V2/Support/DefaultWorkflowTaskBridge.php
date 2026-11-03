@@ -64,7 +64,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      *
      * @var list<string>
      */
-    private const PROJECTION_RUN_RELATIONS = ['instance', 'tasks', 'activityExecutions', 'failures'];
+    private const PROJECTION_RUN_RELATIONS = ['instance', 'activityExecutions', 'failures'];
 
     /**
      * Projection relations for call sites that also need to see active timer
@@ -73,13 +73,7 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      *
      * @var list<string>
      */
-    private const PROJECTION_RUN_RELATIONS_WITH_TIMERS = [
-        'instance',
-        'tasks',
-        'activityExecutions',
-        'timers',
-        'failures',
-    ];
+    private const PROJECTION_RUN_RELATIONS_WITH_TIMERS = ['instance', 'activityExecutions', 'timers', 'failures'];
 
     /**
      * Projection relations for call sites that also need the full history
@@ -90,7 +84,6 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      */
     private const PROJECTION_RUN_RELATIONS_WITH_HISTORY = [
         'instance',
-        'tasks',
         'activityExecutions',
         'timers',
         'failures',
@@ -106,7 +99,6 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
      */
     private const PROJECTION_RUN_RELATIONS_WITH_CHILDREN = [
         'instance',
-        'tasks',
         'activityExecutions',
         'timers',
         'failures',

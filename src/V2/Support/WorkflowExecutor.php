@@ -224,7 +224,6 @@ final class WorkflowExecutor
                     'activityExecutions',
                     'timers',
                     'failures',
-                    'tasks',
                     'commands',
                     'updates',
                     'historyEvents',
@@ -1989,7 +1988,6 @@ final class WorkflowExecutor
             'activityExecutions',
             'timers',
             'failures',
-            'tasks',
             'commands',
             'updates',
             'historyEvents',
@@ -2500,7 +2498,6 @@ final class WorkflowExecutor
         $this->projectRun(
             $childRun->fresh([
                 'instance',
-                'tasks',
                 'activityExecutions',
                 'timers',
                 'failures',
@@ -3062,9 +3059,7 @@ final class WorkflowExecutor
             TaskDispatcher::dispatch($signalTask);
         }
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     private function createPendingSignalResumeTask(
@@ -3430,9 +3425,7 @@ final class WorkflowExecutor
 
         LifecycleEventDispatcher::workflowStarted($continuedRun);
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
         foreach (array_keys($parentRunsToProject) as $parentRunId) {
             /** @var WorkflowRun|null $parentRun */
             $parentRun = WorkflowRun::query()->find($parentRunId);
@@ -3444,7 +3437,6 @@ final class WorkflowExecutor
             $this->projectRun(
                 $parentRun->fresh([
                     'instance',
-                    'tasks',
                     'activityExecutions',
                     'timers',
                     'failures',
@@ -3456,7 +3448,7 @@ final class WorkflowExecutor
             );
         }
         $this->projectRun(
-            $continuedRun->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+            $continuedRun->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
         );
 
         return $continuedTask;
@@ -3513,9 +3505,7 @@ final class WorkflowExecutor
 
         $this->dispatchParentResumeTasks($run);
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     /**
@@ -3598,7 +3588,7 @@ final class WorkflowExecutor
         $exceptionClass = WorkflowTimeoutException::class;
 
         // Cancel all open tasks except the current one.
-        $openTasks = $run->tasks
+        $openTasks = RuntimeTaskQuery::open($run)
             ->filter(
                 static fn (WorkflowTask $t): bool => in_array($t->status, [TaskStatus::Ready, TaskStatus::Leased], true)
                 && $t->id !== $task->id
@@ -3711,9 +3701,7 @@ final class WorkflowExecutor
         // Notify parent workflows and project summary.
         $this->dispatchParentResumeTasks($run);
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     private function failRun(
@@ -3819,9 +3807,7 @@ final class WorkflowExecutor
 
         $this->dispatchParentResumeTasks($run);
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     private function ensureStepHistoryCompatible(
@@ -3899,9 +3885,7 @@ final class WorkflowExecutor
             'lease_expires_at' => null,
         ])->save();
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     private function blockReplayUntilCompatibleConditionWaitDefinition(
@@ -3929,9 +3913,7 @@ final class WorkflowExecutor
             'lease_expires_at' => null,
         ])->save();
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     private function blockReplayUntilCompatibleHistoryShape(
@@ -3953,9 +3935,7 @@ final class WorkflowExecutor
             'lease_expires_at' => null,
         ])->save();
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
     }
 
     /**
@@ -4274,7 +4254,7 @@ final class WorkflowExecutor
         TaskDispatcher::dispatch($retryTask);
 
         $this->projectRun(
-            $retryRun->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+            $retryRun->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
         );
 
         return $retryTask;
@@ -4350,7 +4330,6 @@ final class WorkflowExecutor
                     $this->projectRun(
                         $parentRun->fresh([
                             'instance',
-                            'tasks',
                             'activityExecutions',
                             'timers',
                             'failures',
@@ -4379,7 +4358,6 @@ final class WorkflowExecutor
                     $this->projectRun(
                         $parentRun->fresh([
                             'instance',
-                            'tasks',
                             'activityExecutions',
                             'timers',
                             'failures',
@@ -4421,7 +4399,6 @@ final class WorkflowExecutor
                     $this->projectRun(
                         $parentRun->fresh([
                             'instance',
-                            'tasks',
                             'activityExecutions',
                             'timers',
                             'failures',
@@ -4446,7 +4423,6 @@ final class WorkflowExecutor
                     $this->projectRun(
                         $parentRun->fresh([
                             'instance',
-                            'tasks',
                             'activityExecutions',
                             'timers',
                             'failures',
@@ -4489,7 +4465,6 @@ final class WorkflowExecutor
             $this->projectRun(
                 $parentRun->fresh([
                     'instance',
-                    'tasks',
                     'activityExecutions',
                     'timers',
                     'failures',
@@ -5666,9 +5641,7 @@ final class WorkflowExecutor
             'compatibility' => $run->compatibility,
         ]);
 
-        $this->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
-        );
+        $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']));
 
         return $nextTask;
     }
@@ -5801,7 +5774,7 @@ final class WorkflowExecutor
 
         TimerCancellation::record($run, $timer, $task);
 
-        foreach ($run->tasks as $runTask) {
+        foreach (RuntimeTaskQuery::open($run) as $runTask) {
             if (
                 ($runTask->payload['timer_id'] ?? null) !== $timer->id
                 || ! in_array($runTask->status, [TaskStatus::Ready, TaskStatus::Leased], true)

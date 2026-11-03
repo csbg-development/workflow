@@ -992,8 +992,6 @@ final class LocalActivityExecutor
     {
         /** @var \Workflow\V2\Contracts\HistoryProjectionRole $role */
         $role = app(\Workflow\V2\Contracts\HistoryProjectionRole::class);
-        $role->projectRun(
-            $run->fresh(['instance', 'tasks', 'activityExecutions', 'failures', 'historyEvents']) ?? $run
-        );
+        $role->projectRun($run->fresh(['instance', 'activityExecutions', 'failures', 'historyEvents']) ?? $run);
     }
 }

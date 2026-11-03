@@ -326,7 +326,7 @@ final class StandaloneActivityStartService
     {
         /** @var HistoryProjectionRole $role */
         $role = app(HistoryProjectionRole::class);
-        $role->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+        $role->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
     }
 
     private static function intOrNull(mixed $value): ?int

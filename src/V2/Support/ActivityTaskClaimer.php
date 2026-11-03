@@ -289,7 +289,7 @@ final class ActivityTaskClaimer
 
     private static function projectionRun(WorkflowRun $run): WorkflowRun
     {
-        return $run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']) ?? $run;
+        return $run->fresh(['instance', 'activityExecutions', 'failures']) ?? $run;
     }
 
     private static function nonEmptyString(mixed $value): ?string

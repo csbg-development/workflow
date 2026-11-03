@@ -30,12 +30,24 @@ final class HistoryTimeline
      */
     public static function fromHistory(WorkflowRun $run): array
     {
-        $run->loadMissing(['historyEvents', 'commands', 'tasks', 'activityExecutions', 'timers', 'failures']);
+        $run->loadMissing(['historyEvents', 'commands', 'activityExecutions', 'timers', 'failures']);
 
         /** @var Collection<string, WorkflowCommand> $commands */
         $commands = $run->commands->keyBy('id');
         /** @var Collection<string, WorkflowTask> $tasks */
-        $tasks = $run->tasks->keyBy('id');
+        $tasks = collect();
+        if ($run->relationLoaded('tasks')) {
+            $tasks = $run->tasks->keyBy('id');
+        } else {
+            $taskIds = $run->historyEvents->pluck('workflow_task_id')
+                ->filter(static fn (mixed $id): bool => is_string($id) && $id !== '')
+                ->unique();
+            foreach ($taskIds->chunk(128) as $ids) {
+                foreach (RuntimeTaskQuery::forRun($run)->whereIn('id', $ids->all())->get() as $task) {
+                    $tasks->put($task->id, $task);
+                }
+            }
+        }
         /** @var Collection<string, ActivityExecution> $activities */
         $activities = $run->activityExecutions->keyBy('id');
         /** @var Collection<string, WorkflowTimer> $timers */

@@ -153,7 +153,7 @@ final class DefaultWorkflowControlPlane implements RuntimeSignalControlPlane, Wo
 
                 $this->projectRun(
                     $currentRun->fresh(
-                        ['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents']
+                        ['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']
                     ) ?? $currentRun
                 );
 

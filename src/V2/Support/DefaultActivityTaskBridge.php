@@ -32,7 +32,7 @@ final class DefaultActivityTaskBridge implements ActivityTaskBridge
      *
      * @var list<string>
      */
-    private const PROJECTION_RUN_RELATIONS = ['instance', 'tasks', 'activityExecutions', 'failures'];
+    private const PROJECTION_RUN_RELATIONS = ['instance', 'activityExecutions', 'failures'];
 
     public function poll(
         ?string $connection,

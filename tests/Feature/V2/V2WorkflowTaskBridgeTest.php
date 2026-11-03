@@ -11367,7 +11367,7 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame([['projectRun', $run->id], ['projectRun', $run->id]], $customRole->calls);
     }
 
-    public function testExecuteUsesBoundedClaimProjectionBeforeFullStateTransitionProjection(): void
+    public function testExecuteUsesBoundedTaskLoadingDuringStateTransitionProjection(): void
     {
         $run = $this->createWaitingRun();
 
@@ -11460,7 +11460,8 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(0, $customRole->calls[0]['timeline_reads']);
         $this->assertNull($customRole->calls[1]['claim_task_id']);
         $this->assertTrue($customRole->calls[1]['history_loaded']);
-        $this->assertTrue($customRole->calls[1]['tasks_loaded']);
+        // State transitions still project history/timeline without hydrating closed task history.
+        $this->assertFalse($customRole->calls[1]['tasks_loaded']);
         $this->assertGreaterThan(0, $customRole->calls[1]['timeline_reads']);
     }
 

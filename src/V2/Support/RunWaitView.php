@@ -46,7 +46,6 @@ final class RunWaitView
         $run->loadMissing([
             'historyEvents',
             'commands',
-            'tasks',
             'activityExecutions',
             'timers',
             'childLinks.childRun.summary',
@@ -561,7 +560,7 @@ final class RunWaitView
     ): array {
         $tasks = [];
 
-        foreach ($run->tasks as $task) {
+        foreach (RuntimeTaskQuery::withPayloadKey($run, $payloadKey, $requiredType) as $task) {
             if (! $task instanceof WorkflowTask) {
                 continue;
             }

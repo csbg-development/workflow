@@ -102,31 +102,40 @@ final class TaskRepair
 
     private static function recoverableTask(WorkflowRun $run): ?WorkflowTask
     {
-        /** @var WorkflowTask|null $task */
-        $task = $run->tasks
-            ->filter(static fn (WorkflowTask $task): bool => TaskRepairPolicy::readyTaskNeedsRedispatch($task)
-                || TaskRepairPolicy::leaseExpired($task)
-                || self::replayBlocked($task))
-            ->sort(static function (WorkflowTask $left, WorkflowTask $right): int {
-                $leftAvailableAt = $left->available_at?->getTimestampMs() ?? PHP_INT_MAX;
-                $rightAvailableAt = $right->available_at?->getTimestampMs() ?? PHP_INT_MAX;
+        $candidates = $run->relationLoaded('tasks') ? $run->tasks : RuntimeTaskQuery::repairCandidates($run)->orderBy(
+            'available_at'
+        )->lazy(128);
+        $selected = null;
+        foreach ($candidates as $candidate) {
+            if (! TaskRepairPolicy::readyTaskNeedsRedispatch($candidate)
+                && ! TaskRepairPolicy::leaseExpired($candidate) && ! self::replayBlocked($candidate)) {
+                continue;
+            }
+            if ($selected === null || self::compareRecoverableTasks($candidate, $selected) < 0) {
+                $selected = $candidate;
+            }
+        }
 
-                if ($leftAvailableAt !== $rightAvailableAt) {
-                    return $leftAvailableAt <=> $rightAvailableAt;
-                }
+        return $selected;
+    }
 
-                $leftCreatedAt = $left->created_at?->getTimestampMs() ?? PHP_INT_MAX;
-                $rightCreatedAt = $right->created_at?->getTimestampMs() ?? PHP_INT_MAX;
+    private static function compareRecoverableTasks(WorkflowTask $left, WorkflowTask $right): int
+    {
+        $leftAvailableAt = $left->available_at?->getTimestampMs() ?? PHP_INT_MAX;
+        $rightAvailableAt = $right->available_at?->getTimestampMs() ?? PHP_INT_MAX;
 
-                if ($leftCreatedAt !== $rightCreatedAt) {
-                    return $leftCreatedAt <=> $rightCreatedAt;
-                }
+        if ($leftAvailableAt !== $rightAvailableAt) {
+            return $leftAvailableAt <=> $rightAvailableAt;
+        }
 
-                return $left->id <=> $right->id;
-            })
-            ->first();
+        $leftCreatedAt = $left->created_at?->getTimestampMs() ?? PHP_INT_MAX;
+        $rightCreatedAt = $right->created_at?->getTimestampMs() ?? PHP_INT_MAX;
 
-        return $task;
+        if ($leftCreatedAt !== $rightCreatedAt) {
+            return $leftCreatedAt <=> $rightCreatedAt;
+        }
+
+        return $left->id <=> $right->id;
     }
 
     private static function replayBlocked(WorkflowTask $task): bool

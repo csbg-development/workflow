@@ -348,7 +348,7 @@ final class ActivityTimeoutEnforcer
             static fn (mixed $value): bool => $value !== null
         ), $existingTask);
 
-        self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+        self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
         return [
             'enforced' => true,
@@ -450,7 +450,7 @@ final class ActivityTimeoutEnforcer
         if (StandaloneActivityHostType::isHostRun($run)) {
             self::closeStandaloneHostRunAfterTimeout($run, $execution, $failure, $exceptionClass, $message, $now);
 
-            self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+            self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
             return [
                 'enforced' => true,
@@ -468,7 +468,7 @@ final class ActivityTimeoutEnforcer
                 ActivityStatus::Failed,
             )
         ) {
-            self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+            self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
             return [
                 'enforced' => true,
@@ -495,7 +495,7 @@ final class ActivityTimeoutEnforcer
             'compatibility' => $run->compatibility,
         ]);
 
-        self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+        self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
         return [
             'enforced' => true,

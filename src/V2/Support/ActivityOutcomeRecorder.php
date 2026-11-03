@@ -146,7 +146,7 @@ final class ActivityOutcomeRecorder
 
                 ActivityCancellation::record($run, $lockedExecution, $currentTask);
 
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return self::ignored($reason);
             }
@@ -236,7 +236,7 @@ final class ActivityOutcomeRecorder
                     'lease_expires_at' => null,
                 ])->save();
 
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return self::recorded(null);
             }
@@ -347,7 +347,7 @@ final class ActivityOutcomeRecorder
                 if ($parallelMetadataPath === []) {
                     self::projectActivityTransition($run, $lockedExecution, $task, $retryTask, $retryEvent);
                 } else {
-                    self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                    self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
                 }
 
                 return self::recorded($retryTask);
@@ -437,7 +437,7 @@ final class ActivityOutcomeRecorder
                 $parallelMetadataPath !== []
                 && ! ParallelChildGroup::shouldWakeParentOnActivityClosure($run, $parallelMetadataPath, $closedStatus)
             ) {
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return self::recorded(null);
             }
@@ -449,7 +449,7 @@ final class ActivityOutcomeRecorder
             if (StandaloneActivityHostType::isHostRun($run)) {
                 self::closeStandaloneHostRun($run, $lockedExecution, $throwable, $resolutionEvent);
 
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return self::recorded(null);
             }
@@ -472,7 +472,7 @@ final class ActivityOutcomeRecorder
             if ($parallelMetadataPath === [] && $resolutionEvent instanceof WorkflowHistoryEvent) {
                 self::projectActivityTransition($run, $lockedExecution, $task, $resumeTask, $resolutionEvent);
             } else {
-                self::projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                self::projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
             }
 
             return self::recorded($resumeTask);

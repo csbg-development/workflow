@@ -56,7 +56,7 @@ final class DefaultHistoryProjectionRole implements HistoryProjectionRole, Histo
         );
 
         if ($parallelMetadataPath !== []) {
-            return $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']) ?? $run);
+            return $this->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']) ?? $run);
         }
 
         $projectedRun = $run->fresh() ?? $run;

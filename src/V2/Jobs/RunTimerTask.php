@@ -44,7 +44,7 @@ final class RunTimerTask implements ShouldQueue
      *
      * @var list<string>
      */
-    private const PROJECTION_RUN_RELATIONS = ['instance', 'tasks', 'activityExecutions', 'timers', 'failures'];
+    private const PROJECTION_RUN_RELATIONS = ['instance', 'activityExecutions', 'timers', 'failures'];
 
     /**
      * Run relations plus the history-event graph required when a timer
@@ -57,7 +57,6 @@ final class RunTimerTask implements ShouldQueue
      */
     private const PROJECTION_RUN_RELATIONS_WITH_HISTORY_EVENTS = [
         'instance',
-        'tasks',
         'activityExecutions',
         'timers',
         'failures',

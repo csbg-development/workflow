@@ -83,9 +83,7 @@ final class RunWorkflowTask implements ShouldQueue
                         'lease_expires_at' => null,
                     ])->save();
 
-                    $this->projectRun(
-                        $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures'])
-                    );
+                    $this->projectRun($run->fresh(['instance', 'activityExecutions', 'timers', 'failures']));
 
                     return null;
                 }
@@ -114,7 +112,7 @@ final class RunWorkflowTask implements ShouldQueue
                     $run = ConfiguredV2Models::query('run_model', WorkflowRun::class)->findOrFail(
                         $task->workflow_run_id
                     );
-                    $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                    $this->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
                 });
             } catch (Throwable) {
                 // Failure persistence must not replace the execution exception.
@@ -147,13 +145,13 @@ final class RunWorkflowTask implements ShouldQueue
             TaskCompatibility::sync($task, $run);
 
             if (TaskBackendCapabilities::recordClaimFailureIfUnsupported($task) !== null) {
-                $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                $this->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return null;
             }
 
             if (! TaskCompatibility::supported($task, $run)) {
-                $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                $this->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
                 return null;
             }
@@ -170,7 +168,7 @@ final class RunWorkflowTask implements ShouldQueue
                 'last_claim_error' => null,
             ])->save();
 
-            $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+            $this->projectRun($run->fresh(['instance', 'activityExecutions', 'failures']));
 
             return $task;
         });

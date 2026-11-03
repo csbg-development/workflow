@@ -68,7 +68,7 @@ final class RunSummaryProjector
             return $fastSummary;
         }
 
-        $run->loadMissing(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents']);
+        $run->loadMissing(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents']);
         $run->loadMissing(['childLinks.childRun.instance.currentRun', 'childLinks.childRun.failures']);
         $currentRun = $run->instance === null
             ? null
@@ -1359,7 +1359,11 @@ final class RunSummaryProjector
             return true;
         }
 
-        foreach ($run->tasks as $task) {
+        if (! $run->relationLoaded('tasks') && RuntimeTaskQuery::historicalProblem($run)) {
+            return true;
+        }
+
+        foreach ($run->relationLoaded('tasks') ? $run->tasks : RuntimeTaskQuery::open($run) as $task) {
             if (self::workflowTaskProblemEvidence($task)) {
                 return true;
             }
@@ -1411,7 +1415,7 @@ final class RunSummaryProjector
     private static function nextOpenTask(WorkflowRun $run): ?WorkflowTask
     {
         /** @var WorkflowTask|null $task */
-        $task = $run->tasks
+        $task = RuntimeTaskQuery::open($run)
             ->filter(static fn (WorkflowTask $task): bool => in_array(
                 $task->status,
                 [TaskStatus::Ready, TaskStatus::Leased],
@@ -1448,17 +1452,16 @@ final class RunSummaryProjector
 
     private static function replayBlockedTask(WorkflowRun $run): ?WorkflowTask
     {
-        /** @var WorkflowTask|null $task */
-        $task = $run->tasks
-            ->filter(static fn (WorkflowTask $task): bool => $task->task_type === TaskType::Workflow
-                && $task->status === TaskStatus::Failed
-                && ($task->payload['replay_blocked'] ?? false) === true)
-            ->sortByDesc(static fn (WorkflowTask $task): int => $task->updated_at?->getTimestampMs()
-                ?? $task->created_at?->getTimestampMs()
-                ?? 0)
-            ->first();
+        $selected = null;
+        foreach (RuntimeTaskQuery::replayBlocked($run) as $candidate) {
+            $time = $candidate->updated_at?->getTimestampMs() ?? $candidate->created_at?->getTimestampMs() ?? 0;
+            $selectedTime = $selected?->updated_at?->getTimestampMs() ?? $selected?->created_at?->getTimestampMs() ?? 0;
+            if ($selected === null || $time > $selectedTime) {
+                $selected = $candidate;
+            }
+        }
 
-        return $task;
+        return $selected;
     }
 
     /**
@@ -2259,7 +2262,7 @@ final class RunSummaryProjector
         }
 
         /** @var WorkflowTask|null $task */
-        $task = $run->tasks
+        $task = RuntimeTaskQuery::open($run)
             ->first(static fn (WorkflowTask $task): bool => $task->id === $taskId
                 && in_array($task->status, [TaskStatus::Ready, TaskStatus::Leased], true));
 

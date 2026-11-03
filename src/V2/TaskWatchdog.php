@@ -257,7 +257,7 @@ final class TaskWatchdog
                 $task = TaskRepair::recoverExistingTask($task, $run);
 
                 self::historyProjectionRole()->projectRun(
-                    $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+                    $run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
                 );
 
                 return $task;
@@ -393,7 +393,7 @@ final class TaskWatchdog
             $task = DB::transaction(static function () use ($runId): ?WorkflowTask {
                 /** @var WorkflowRun $run */
                 $run = WorkflowRun::query()
-                    ->with(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+                    ->with(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
                     ->lockForUpdate()
                     ->findOrFail($runId);
 
@@ -407,7 +407,7 @@ final class TaskWatchdog
                 $task = TaskRepair::repairRun($run, $summary);
 
                 self::historyProjectionRole()->projectRun(
-                    $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+                    $run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
                 );
 
                 return $task;
@@ -602,7 +602,7 @@ final class TaskWatchdog
                 ]);
 
                 self::historyProjectionRole()->projectRun(
-                    $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
+                    $run->fresh(['instance', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
                 );
 
                 return $task;
