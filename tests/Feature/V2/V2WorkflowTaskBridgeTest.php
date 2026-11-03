@@ -10836,7 +10836,10 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertTrue($scheduled['completed']);
 
         $activityBridge = $this->app->make(ActivityTaskBridge::class);
-        $failActivity = function (int $sequence, string $message) use ($activityBridge, $run): void {
+        // Both activities must be in flight before the parent handles the winner.
+        // A terminal parent correctly refuses a new sibling claim.
+        $claims = [];
+        foreach ([1, 2] as $sequence) {
             /** @var ActivityExecution $execution */
             $execution = ActivityExecution::query()
                 ->where('workflow_run_id', $run->id)
@@ -10852,7 +10855,11 @@ final class V2WorkflowTaskBridgeTest extends TestCase
             $claim = $activityBridge->claim($activityTask->id, "nested-failure-worker-{$sequence}");
 
             $this->assertNotNull($claim);
-            $failed = $activityBridge->fail($claim['activity_attempt_id'], new RuntimeException($message));
+            $claims[$sequence] = $claim;
+        }
+
+        $failActivity = function (int $sequence, string $message) use ($activityBridge, $claims): void {
+            $failed = $activityBridge->fail($claims[$sequence]['activity_attempt_id'], new RuntimeException($message));
             $this->assertTrue($failed['recorded']);
         };
 

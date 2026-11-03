@@ -4586,6 +4586,7 @@ final class V2WorkflowTest extends TestCase
             'activity_class' => 'Legacy\\GreetingActivity',
             'activity_type' => 'config-greeting-activity',
             'status' => ActivityStatus::Pending->value,
+            'attempt_count' => 0,
             'arguments' => Serializer::serialize(['Taylor']),
             'connection' => 'redis',
             'queue' => 'default',
@@ -6835,6 +6836,21 @@ final class V2WorkflowTest extends TestCase
                         ->addMinutes(5),
                 ]);
 
+            // A replacement owner needs a persisted attempt with matching lineage.
+            ActivityAttempt::query()->create([
+                'id' => '01JTESTATTEMPT000000000002',
+                'workflow_run_id' => $task->workflow_run_id,
+                'activity_execution_id' => $executionId,
+                'workflow_task_id' => $task->id,
+                'attempt_number' => 2,
+                'status' => 'running',
+                'lease_owner' => 'worker-newer',
+                'started_at' => now()
+                    ->subSecond(),
+                'lease_expires_at' => now()
+                    ->addMinutes(5),
+            ]);
+
             ActivityExecution::query()
                 ->whereKey($executionId)
                 ->update([
@@ -6853,6 +6869,7 @@ final class V2WorkflowTest extends TestCase
         /** @var ActivityAttempt $attempt */
         $attempt = ActivityAttempt::query()
             ->where('activity_execution_id', $execution->id)
+            ->where('attempt_number', 1)
             ->firstOrFail();
 
         $this->assertSame(TaskStatus::Leased, $task->status);
@@ -6860,6 +6877,7 @@ final class V2WorkflowTest extends TestCase
         $this->assertSame(ActivityStatus::Running, $execution->status);
         $this->assertSame(2, $execution->attempt_count);
         $this->assertSame('01JTESTATTEMPT000000000002', $execution->current_attempt_id);
+        $this->assertSame('running', ActivityAttempt::query()->findOrFail('01JTESTATTEMPT000000000002')->status->value);
         $this->assertSame('expired', $attempt->status->value);
         $this->assertNotNull($attempt->closed_at);
         $this->assertSame(1, WorkflowHistoryEvent::query()
