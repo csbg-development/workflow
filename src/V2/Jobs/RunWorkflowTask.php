@@ -93,26 +93,33 @@ final class RunWorkflowTask implements ShouldQueue
                 return $executor->run($run, $task);
             });
         } catch (Throwable $throwable) {
-            DB::transaction(function () use ($throwable): void {
-                /** @var WorkflowTask|null $task */
-                $task = ConfiguredV2Models::query('task_model', WorkflowTask::class)
-                    ->lockForUpdate()
-                    ->find($this->taskId);
+            try {
+                DB::transaction(function () use ($throwable): void {
+                    /** @var WorkflowTask|null $task */
+                    $task = ConfiguredV2Models::query('task_model', WorkflowTask::class)
+                        ->lockForUpdate()
+                        ->find($this->taskId);
 
-                if ($task === null) {
-                    return;
-                }
+                    if ($task === null) {
+                        return;
+                    }
 
-                $task->forceFill([
-                    'status' => TaskStatus::Failed,
-                    'last_error' => $throwable->getMessage(),
-                    'lease_expires_at' => null,
-                ])->save();
+                    $task->forceFill([
+                        'status' => TaskStatus::Failed,
+                        'last_error' => $throwable->getMessage(),
+                        'lease_expires_at' => null,
+                    ])->save();
 
-                /** @var WorkflowRun $run */
-                $run = ConfiguredV2Models::query('run_model', WorkflowRun::class)->findOrFail($task->workflow_run_id);
-                $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
-            });
+                    /** @var WorkflowRun $run */
+                    $run = ConfiguredV2Models::query('run_model', WorkflowRun::class)->findOrFail(
+                        $task->workflow_run_id
+                    );
+                    $this->projectRun($run->fresh(['instance', 'tasks', 'activityExecutions', 'failures']));
+                });
+            } catch (Throwable) {
+                // Failure persistence must not replace the execution exception.
+                // The queue worker still receives the original throwable below.
+            }
 
             throw $throwable;
         }

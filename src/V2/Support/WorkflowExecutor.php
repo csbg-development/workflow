@@ -3088,15 +3088,13 @@ final class WorkflowExecutor
             ->get();
 
         $freshRun = $run->fresh(['historyEvents']) ?? $run;
-        $hasAdvanceableConditionWait = self::hasAdvanceableConditionWait($freshRun);
-        $openSignalWaitsById = self::openSignalWaitsById($freshRun);
+        $signalEligibility = SignalResumeEligibility::forRun($freshRun);
 
         $eligibleSignals = $signals
             ->filter(
-                static fn (WorkflowSignal $candidate): bool => self::signalCanAdvanceOpenWait(
-                    $candidate,
-                    $hasAdvanceableConditionWait,
-                    $openSignalWaitsById,
+                static fn (WorkflowSignal $candidate): bool => $signalEligibility->accepts(
+                    $candidate->signal_name,
+                    $candidate->signal_wait_id,
                 )
             )
             ->values();
@@ -3138,58 +3136,6 @@ final class WorkflowExecutor
         ]);
 
         return $signalTask;
-    }
-
-    /**
-     * @param array<string, string> $openSignalWaitsById
-     */
-    private static function signalCanAdvanceOpenWait(
-        WorkflowSignal $signal,
-        bool $hasAdvanceableConditionWait,
-        array $openSignalWaitsById,
-    ): bool {
-        if ($hasAdvanceableConditionWait) {
-            return true;
-        }
-
-        $signalWaitId = self::nonEmptyString($signal->signal_wait_id);
-
-        return $signalWaitId !== null
-            && ($openSignalWaitsById[$signalWaitId] ?? null) === $signal->signal_name;
-    }
-
-    private static function hasAdvanceableConditionWait(WorkflowRun $run): bool
-    {
-        foreach (ConditionWaits::forRun($run) as $wait) {
-            if (($wait['status'] ?? null) === 'open' && ($wait['source_status'] ?? null) !== 'timeout_fired') {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /**
-     * @return array<string, string>
-     */
-    private static function openSignalWaitsById(WorkflowRun $run): array
-    {
-        $waits = [];
-
-        foreach (SignalWaits::forRun($run) as $wait) {
-            if (($wait['status'] ?? null) !== 'open') {
-                continue;
-            }
-
-            $signalWaitId = self::nonEmptyString($wait['signal_wait_id'] ?? null);
-            $signalName = self::nonEmptyString($wait['signal_name'] ?? null);
-
-            if ($signalWaitId !== null && $signalName !== null) {
-                $waits[$signalWaitId] = $signalName;
-            }
-        }
-
-        return $waits;
     }
 
     private static function nonEmptyString(mixed $value): ?string

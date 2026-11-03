@@ -12,12 +12,14 @@ use Tests\TestCase;
 use Workflow\Serializers\CodecRegistry;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Contracts\MatchingRole;
+use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Enums\SignalStatus;
 use Workflow\V2\Enums\TaskStatus;
 use Workflow\V2\Enums\TaskType;
 use Workflow\V2\Jobs\RunWorkflowTask;
 use Workflow\V2\Models\WorkerCompatibilityHeartbeat;
+use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
@@ -86,13 +88,14 @@ final class V2RepairPassCommandTest extends TestCase
             ->sole();
 
         $this->assertSame(1, $task->repair_count);
-        $this->assertSame([
+        $this->assertSameJsonObject([
             'workflow_wait_kind' => 'signal',
             'open_wait_id' => sprintf('signal-application:%s', $signal->id),
             'resume_source_kind' => 'workflow_signal',
             'resume_source_id' => $signal->id,
             'workflow_signal_id' => $signal->id,
             'signal_name' => $signal->signal_name,
+            'signal_wait_id' => $signal->signal_wait_id,
             'workflow_command_id' => $signal->workflow_command_id,
         ], $task->payload);
 
@@ -853,11 +856,18 @@ final class V2RepairPassCommandTest extends TestCase
             'target_scope' => 'instance',
             'resolved_workflow_run_id' => $run->id,
             'signal_name' => 'name-provided',
+            'signal_wait_id' => 'pending-signal-wait',
             'status' => SignalStatus::Received->value,
             'payload_codec' => CodecRegistry::defaultCodec(),
             'arguments' => Serializer::serializeWithCodec(CodecRegistry::defaultCodec(), []),
             'received_at' => now()
                 ->subMinute(),
+        ]);
+
+        WorkflowHistoryEvent::record($run, HistoryEventType::SignalWaitOpened, [
+            'signal_wait_id' => 'pending-signal-wait',
+            'signal_name' => 'name-provided',
+            'sequence' => 1,
         ]);
 
         WorkflowRunSummary::query()->create([

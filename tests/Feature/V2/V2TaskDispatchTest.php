@@ -80,7 +80,7 @@ final class V2TaskDispatchTest extends TestCase
         $workflowClaim = new ReflectionMethod(RunWorkflowTask::class, 'claimTask');
         $workflowClaim->setAccessible(true);
 
-        $this->assertTrue($workflowClaim->invoke(new RunWorkflowTask($workflowTask->id)));
+        $this->assertInstanceOf(WorkflowTask::class, $workflowClaim->invoke(new RunWorkflowTask($workflowTask->id)));
         $this->assertTrue($workflowTask->fresh()->lease_expires_at->equalTo($now->copy()->addSeconds(8)));
 
         $timerRun = $this->createWaitingRun('01J00000000000000000TIMER');
@@ -112,7 +112,9 @@ final class V2TaskDispatchTest extends TestCase
         $timerClaim->setAccessible(true);
         $timerResult = $timerClaim->invoke(new RunTimerTask($timerTask->id));
 
-        $this->assertSame([$timer->id, null], $timerResult);
+        $this->assertInstanceOf(WorkflowTask::class, $timerResult[0]);
+        $this->assertSame($timerTask->id, $timerResult[0]->id);
+        $this->assertNull($timerResult[1]);
         $this->assertTrue($timerTask->fresh()->lease_expires_at->equalTo($now->copy()->addSeconds(8)));
 
         $localRun = $this->createWaitingRun('01J00000000000000000LOCAL');
@@ -525,6 +527,7 @@ final class V2TaskDispatchTest extends TestCase
             'activity_class' => TestGreetingActivity::class,
             'activity_type' => TestGreetingActivity::class,
             'status' => ActivityStatus::Pending->value,
+            'attempt_count' => 0,
             'arguments' => Serializer::serialize(['Taylor']),
             'connection' => 'sync',
             'queue' => 'default',
@@ -588,6 +591,7 @@ final class V2TaskDispatchTest extends TestCase
             'activity_class' => TestGreetingActivity::class,
             'activity_type' => TestGreetingActivity::class,
             'status' => ActivityStatus::Pending->value,
+            'attempt_count' => 0,
             'arguments' => Serializer::serialize(['Taylor']),
             'connection' => 'sync',
             'queue' => 'default',

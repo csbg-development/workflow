@@ -1810,9 +1810,11 @@ final class RunSummaryProjector
      */
     private static function openSignalApplicationWait(WorkflowRun $run): ?array
     {
+        $signalEligibility = SignalResumeEligibility::forRun($run);
         $receivedSignals = array_values(array_filter(
             RunSignalView::forRun($run),
-            static fn (array $signal): bool => ($signal['status'] ?? null) === 'received',
+            static fn (array $signal): bool => ($signal['status'] ?? null) === 'received'
+                && $signalEligibility->accepts($signal['name'] ?? null, $signal['signal_wait_id'] ?? null),
         ));
 
         if ($receivedSignals === []) {
